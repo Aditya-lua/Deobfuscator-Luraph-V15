@@ -179,10 +179,12 @@ async function run(job) {
         fs.writeFileSync(cfgPath, JSON.stringify(cfgData), 'utf8');
 
         const { execFileSync } = require('child_process');
+        const { getPythonBin } = require('./pyenv');
+        const pythonBin = getPythonBin();
         const bridgePy = path.join(__dirname, 'devirt_bridge.py');
         const coreDir = path.join(__dirname, '..', 'core');
         try {
-          execFileSync('python', [bridgePy, 'pipeline', cfgPath], {
+          execFileSync(pythonBin, [bridgePy, 'pipeline', cfgPath], {
             env: Object.assign({}, process.env, { PYTHONPATH: coreDir }),
             stdio: 'inherit',
           });

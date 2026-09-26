@@ -3,16 +3,18 @@
 const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { getPythonBin } = require('./pyenv');
 
 const HERE = __dirname;
 const BRIDGE_PATH = path.join(HERE, 'devirt_bridge.py');
 const CORE_DIR = path.join(HERE, '..', 'core');
 
 function runBridge(cmd, args) {
+  const pythonBin = getPythonBin();
   const env = Object.assign({}, process.env, {
     PYTHONPATH: CORE_DIR,
   });
-  const stdout = execFileSync('python', [BRIDGE_PATH, cmd, ...args], {
+  const stdout = execFileSync(pythonBin, [BRIDGE_PATH, cmd, ...args], {
     env,
     encoding: 'utf8',
     maxBuffer: 512 * 1024 * 1024,

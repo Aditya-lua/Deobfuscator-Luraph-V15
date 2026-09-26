@@ -103,11 +103,17 @@ npm install
 
 ### Basic Commands
 ```bash
-# Deobfuscate script (saves to ./output/<filename>)
+# Deobfuscate a single script (saves to ./output/<filename>)
 node deob.js input.lua
 
 # Save to a specific output path
 node deob.js input.lua -o output.lua
+
+# Batch mode: process a whole folder of scripts
+node deob.js ./my_scripts_folder/
+
+# Batch mode: process multiple files at once
+node deob.js file1.lua file2.lua file3.lua
 
 # Fast trace-only mode (~2 seconds, skips bytecode lifting)
 node deob.js input.lua --no-devirt
@@ -115,6 +121,12 @@ node deob.js input.lua --no-devirt
 # Detect if a script is protected by Luraph without running it
 node deob.js input.lua --detect
 ```
+
+> **Note:** If your system uses a different Python command (`py`, `python3`, or a virtual environment binary), set the `PYTHON_BIN` environment variable:
+> ```bash
+> set PYTHON_BIN=py        # Windows
+> export PYTHON_BIN=python3   # Linux / macOS
+> ```
 
 ---
 

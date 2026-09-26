@@ -631,6 +631,7 @@ class State:
 
 WALK_MAX_ERRORS = 100    
 WALK_RESTARTS = 64       
+WALK_LIMIT = int(os.environ.get("DEVIRT_WALK_LIMIT", 35000))       
 
 MAX_STACK_DEPTHS = 8     
 STACK_WALK_MAX = 30000   
@@ -918,10 +919,9 @@ class ProtoLifter:
         return Reg(REG_ARRAY + a.v), b
 
     def library_name(self, t):
-        for k, v in self.globals_tab.h.items():
-            if v is t and isinstance(k, bytes):
-                return k.decode("latin-1")
-        return None
+        if not hasattr(self, "_lib_names"):
+            self._lib_names = {id(v): k.decode("latin-1") for k, v in self.globals_tab.h.items() if isinstance(k, bytes)}
+        return self._lib_names.get(id(t))
 
     def set_global(self, name, v):
 
@@ -936,18 +936,20 @@ class ProtoLifter:
         raise Unsupported("varargs outside vararg function")
 
     def as_expr(self, v):
-        if isinstance(v, BoxPart):
-            return Index(Upval(v.idx), self.as_expr(v.k))
-        if isinstance(v, BoxProxy):
-            return Upval(v.idx)
         if isinstance(v, Expr):
-            return v
-        if isinstance(v, Vec):
             return v
         if v is None or isinstance(v, (bool, int, float, bytes)):
             return Const(v)
         if isinstance(v, Multi):
             return self.as_expr(v.first())
+        if isinstance(v, SymList):
+            return v
+        if isinstance(v, Vec):
+            return v
+        if isinstance(v, BoxPart):
+            return Index(Upval(v.idx), self.as_expr(v.k))
+        if isinstance(v, BoxProxy):
+            return Upval(v.idx)
         if isinstance(v, EnvTable):
             return Global("_ENV")
         if isinstance(v, LuaFunc) and isinstance(self.vm, JitModel):
@@ -970,6 +972,7 @@ class ProtoLifter:
             text = self.plain_function_text(v)
             if text is not None:
                 return Opaque("function", text)
+            return Opaque("function", "function(...) end")
         raise Unsupported("value %r in an expression" % (v,))
 
     def plain_closure(self, fn):
@@ -1075,6 +1078,14 @@ class ProtoLifter:
 
     def sym_binop(self, op, a, b):
         if isinstance(a, SymList) or isinstance(b, SymList):
+            if op == "Eq":
+                if not isinstance(a, SymList) or not isinstance(b, SymList):
+                    return False
+                return a is b
+            if op == "Ne":
+                if not isinstance(a, SymList) or not isinstance(b, SymList):
+                    return True
+                return a is not b
             raise Unsupported("arith on packed list")
         return Bin(op, self.as_expr(a), self.as_expr(b))
 
@@ -1082,6 +1093,8 @@ class ProtoLifter:
         if isinstance(a, SymList):
             if op == "Len":
                 return a.count_expr()
+            if op == "Not":
+                return False
             raise Unsupported("unop on packed list")
         return Un(op, self.as_expr(a))
 
@@ -1230,6 +1243,8 @@ class ProtoLifter:
             return None
         if key in lst.extra:
             return lst.extra[key]
+        if is_sym(key):
+            return Index(self.as_expr(lst), self.as_expr(key))
         raise Unsupported("packed list index %r" % (key,))
 
     def newindex(self, obj, key, v, it):
@@ -1346,6 +1361,10 @@ class ProtoLifter:
                 if lib is not None:
 
                     return Global(lib)
+                nkey = b"n"
+                if all(isinstance(k, int) or k == nkey for k in v.h):
+                    items = [self.value_of(v.h.get(i)) for i in range(1, max((k for k in v.h if isinstance(k, int)), default=0) + 1)]
+                    return SymList(items, None, nkey=nkey if nkey in v.h else None)
                 raise Unsupported("storing a non-empty VM table into a register")
             return S.NewTable()
         return self.as_expr(v)
@@ -1768,9 +1787,10 @@ def apply_stmt_facts(st, facts, lf):
             for r, v in st.frame_eval.items():
                 facts[r] = ("c", v)
 
-        for r in list(facts):
-            if r in lf.captured_regs:
-                del facts[r]
+        if lf.captured_regs:
+            for r in list(facts):
+                if r in lf.captured_regs:
+                    del facts[r]
 
 def frame_call(st, facts, lf):
     """A call that gets the caller's register frame (FrameArg), of a closure
@@ -1961,7 +1981,9 @@ class Stepper:
         self.new_carry = False
         self.fixed_decls = {d for d in (self.pc_decl, self.mode_decl, vm.kstack_key) if d}
         self.sp_cands = self._stack_pointer_candidates()
-        self._mode_loop_cache = {}
+        if not hasattr(vm, "_mode_loop_cache"):
+            vm._mode_loop_cache = {}
+        self._mode_loop_cache = vm._mode_loop_cache
 
     def _stack_pointer_candidates(self):
         """Prologue locals the handlers use directly as a register index
@@ -2923,7 +2945,7 @@ class FunctionLifter:
         lf.reg_prefix = prefix
         st = make_stepper(vm, lf)
         for _ in range(WALK_RESTARTS):
-            s0, order, restart = self.prog._walk(vm, lf, st, 400000)
+            s0, order, restart = self.prog._walk(vm, lf, st, WALK_LIMIT)
             if not restart:
                 break
         self.prog.requests |= lf.requests
@@ -2970,7 +2992,7 @@ class FunctionLifter:
             lf.walk_only = True
             st = make_stepper(cvm, lf)
             for _ in range(WALK_RESTARTS):
-                _, _, restart = self.prog._walk(cvm, lf, st, 400000)
+                _, _, restart = self.prog._walk(cvm, lf, st, WALK_LIMIT)
                 if not restart:
                     break
         except Unsupported:
@@ -3186,8 +3208,9 @@ def lift_program(source, protos_path, chunk_paths=(), fetch=None):
         lines = fl.lift(vm, vmobj, proto, UpList(), {}, 0)
         if tag == payload and not loaders:
             out.append("")
-            if fl.params:
-                out.append("local %s = ..." % ", ".join(fl.params))
+            params = [p for p in fl.params if p != "..."]
+            if params:
+                out.append("local %s = ..." % ", ".join(params))
             out += lines
             payload_pid = None
             continue
@@ -3409,7 +3432,7 @@ def _walk_one(prog, vm, vmobj, proto, pkey):
         lf.walk_only = True
         st = make_stepper(vm, lf)
         for _ in range(WALK_RESTARTS):
-            s0, order, restart = prog._walk(vm, lf, st, 400000)
+            s0, order, restart = prog._walk(vm, lf, st, WALK_LIMIT)
             if not restart:
                 break
     except Unsupported:

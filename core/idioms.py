@@ -1,29 +1,10 @@
-"""
-Readability passes on the structured AST of a lifted function (after
-structuring and renaming, before `local` declarations are placed).
-
-  and_or()   The VM compiles `a and b` / `a or b` into branches that store into
-             one register. These patterns become expressions again:
-               if x then x = A end                  ->  x = x and A
-               if not x then x = B end              ->  x = x or B
-               if c then x = A else x = c end       ->  x = c and A
-               if not c then x = B else x = c end   ->  x = c or B
-               x = V; x = x and A                   ->  x = V and A   (same for or)
-               x = c; if c then x = A end           ->  x = c and A
-               if not c then x = c end              ->  x = c and x   (the result
-                   written over an operand's register: Luraph reuses registers)
-             Each rewrite is an exact equivalence (short-circuit order kept).
-  fold_single_use()  temps back into the statement that reads them (see there).
-"""
 import codegen as CG
 import structure as ST
 from luasym import Un, Bin, Const
 
-
 def key(e):
     k = CG.expr_key(e)
     return None if k.startswith("X") else k
-
 
 def single_assign(stmts):
     """stmts is exactly `x = v` (one local target, one value): (name, value)."""
@@ -35,14 +16,11 @@ def single_assign(stmts):
         return st.targets[0].name, st.values.items[0]
     return None
 
-
 def reads(e, name):
     return any(isinstance(x, CG.LocalName) and x.name == name for x in CG.walk(e))
 
-
 def assign(name, value):
     return CG.AssignS([CG.LocalName(name)], CG.Multi([value]))
-
 
 def match_if(st):
     """An if statement that is really `x = <and/or expression>`, or None."""
@@ -55,11 +33,10 @@ def match_if(st):
     base = c.a if neg else c
     op = "Or" if neg else "And"
     if not st.els:
-        # if x then x = A end
+
         if isinstance(base, CG.LocalName) and base.name == name:
             return assign(name, Bin(op, CG.LocalName(name), a))
-        # the and/or result written over an operand's register (Luraph reuses them):
-        # if not c then x = c end  ->  x = c and x;  if c then x = c end  ->  x = c or x
+
         kb = key(base)
         if kb is not None and key(a) == kb:
             return assign(name, Bin("And" if neg else "Or", base, CG.LocalName(name)))
@@ -69,14 +46,12 @@ def match_if(st):
         return None
     kb = key(base)
     if kb is not None and key(e[1]) == kb:
-        # if c then x = A else x = c end
+
         return assign(name, Bin(op, base, a))
     if kb is not None and key(a) == kb:
-        # if c then x = c else x = B end  ->  x = c or B
-        # if not c then x = c else x = B end  ->  x = c and B
+
         return assign(name, Bin("And" if neg else "Or", base, e[1]))
     return None
-
 
 def and_or(stmts):
     out = ST.SBlock()
@@ -90,7 +65,7 @@ def and_or(stmts):
         elif isinstance(st, ST.SLoop):
             st.body = and_or(st.body)
         prev = single_assign([out[-1]]) if out and isinstance(out[-1], CG.AssignS) else None
-        # x = c; if c then x = A end  ->  x = c and A   (if not c ...: x = c or B)
+
         if prev and isinstance(st, ST.SIf) and not st.els:
             t = single_assign(st.then)
             neg = isinstance(st.cond, Un) and st.cond.op == "Not"
@@ -100,7 +75,7 @@ def and_or(stmts):
                     and not reads(base, t[0]) and not reads(t[1], t[0]):
                 out[-1] = assign(t[0], Bin("Or" if neg else "And", prev[1], t[1]))
                 continue
-        # x = V; x = x and A  ->  x = V and A
+
         if prev and isinstance(st, CG.AssignS):
             cur = single_assign([st])
             if cur and cur[0] == prev[0]:
@@ -111,7 +86,6 @@ def and_or(stmts):
                     continue
         out.append(st)
     return out
-
 
 def _stmt_exprs(st):
     """Expressions a statement evaluates (not nested statement blocks)."""
@@ -143,14 +117,12 @@ def _stmt_exprs(st):
             out.append(CG.TailRef(st.values.tail))
     return [e for e in out if e is not None]
 
-
 def _sub_blocks(st):
     if isinstance(st, ST.SIf):
         return [st.then, st.els]
     if isinstance(st, ST.SLoop):
         return [st.body]
     return []
-
 
 def name_counts(stmts, reads=None, writes=None, text=None):
     """Reads / writes of every LocalName in a function body; `text` collects
@@ -179,7 +151,6 @@ def name_counts(stmts, reads=None, writes=None, text=None):
         name_counts._re = re
     return reads, writes, text
 
-
 def _first_leaf(e):
     """The sub-expression Luau evaluates first."""
     while True:
@@ -191,7 +162,6 @@ def _first_leaf(e):
             e = e.fn
         else:
             return e
-
 
 def _positions(body):
     """Pre-order numbering of the statements: id -> [index, last index of its
@@ -227,13 +197,11 @@ def _positions(body):
         return None
     return pos, rsites, wsites
 
-
 def _same_text(a, b):
     if a is b:
         return True
     r = CG.Renderer()
     return r.expr(a) == r.expr(b)
-
 
 def _eval_list(st):
     """What a statement evaluates, in Luau order (post-order nodes), or None.
@@ -253,18 +221,18 @@ def _eval_list(st):
             if isinstance(e, CG.CallE) and isinstance(e.fn, CG.Index) and e.args.items \
                     and type(e.fn.obj) is type(e.args.items[0]) and CG.children(e.fn.obj) \
                     and _same_text(e.fn.obj, e.args.items[0]):
-                # f(x):M(...): the object is evaluated once (the renderer's method form)
+
                 order(e.fn)
                 for c in kids[2:]:
                     order(c)
             elif isinstance(e, CG.NewTableE):
-                for k, v in e.items:      # key then value, item by item
+                for k, v in e.items:      
                     order(k)
                     order(v)
                 if e.tail is not None:
                     order(CG.TailRef(e.tail))
             else:
-                for c in kids:          # children() lists operands in evaluation order
+                for c in kids:          
                     order(c)
         out.append(e)
     if isinstance(st, ST.SIf):
@@ -289,7 +257,6 @@ def _eval_list(st):
         return None
     return out
 
-
 def _conditional(e, acc):
     """ids of the nodes of e that are evaluated only sometimes (and/or right sides)."""
     def mark(x):
@@ -303,7 +270,6 @@ def _conditional(e, acc):
     for c in CG.children(e):
         _conditional(c, acc)
     return acc
-
 
 def _fold_table_store(prev_st, st):
     """x = {...}; x.k = V  ->  x = {..., k = V} (codegen's fold_tables does this
@@ -339,7 +305,6 @@ def _fold_table_store(prev_st, st):
         return True
     return False
 
-
 def _last_value(e, x):
     """Is x the last value of call e's arguments / constructor e's array items?"""
     if isinstance(e, CG.CallE):
@@ -347,7 +312,6 @@ def _last_value(e, x):
     if isinstance(e, CG.NewTableE):
         return e.tail is None and bool(e.items) and e.items[-1][0] is None and e.items[-1][1] is x
     return False
-
 
 def fold_single_use(body):
     """x = V; <stmt reading x once>  ->  <stmt with V>
@@ -382,10 +346,10 @@ def fold_single_use(body):
         ip = pos[id(prev_st)][0]
         idxs = [pos[s][0] for s in sites if s != id(st)]
         if len(sites) != others + n_in_v:
-            return False        # counts disagree (nested closures, stale sites): be safe
+            return False        
         if any(i > ip for i in idxs):
             return False
-        # innermost loop around x = V
+
         chain = []
         cur = prev_st
         loop = None
@@ -410,7 +374,7 @@ def fold_single_use(body):
         inside = [i for i in idxs if lo <= i <= hi]
         if len(inside) != len(idxs) and (outer is not None or any(i > lo for i in idxs if i not in inside)):
             return False
-        # an unconditional write of x earlier in the iteration, before all of its reads
+
         first = min(inside) if inside else None
         for w in wsites.get(name, []):
             info = pos.get(id(w))
@@ -434,24 +398,24 @@ def fold_single_use(body):
         if in_text(name):
             return False
         if isinstance(v, (CG.FuncE, CG.ClosureExpr)):
-            return False        # (function() ... end)(x) reads worse than a named local
+            return False        
         order = _eval_list(st)
         if order is None:
             return False
         hits = [x for x in order if isinstance(x, CG.LocalName) and x.name == name]
         if not hits:
             return False
-        # x:m(...) reads x once (the self argument is the same read)
+
         n_self = sum(1 for x in order if isinstance(x, CG.CallE) and isinstance(x.fn, CG.Index)
                      and isinstance(x.fn.obj, CG.LocalName) and x.fn.obj.name == name and x.args.items
                      and isinstance(x.args.items[0], CG.LocalName) and x.args.items[0].name == name)
         if len(hits) - n_self != 1:
             return False
         if CG.expands(v) and any(_last_value(x, hits[0]) for x in order):
-            return False        # f((g())) reads worse than a named local (codegen.truncated_use)
+            return False        
         if isinstance(st, ST.SReturn) and CG.expands(v) and st.values.tail is None \
                 and st.values.items and st.values.items[-1] is hits[0]:
-            return False        # `return g()` would return all of g's values
+            return False        
         for x in order:
             if x is hits[0]:
                 break
@@ -482,7 +446,7 @@ def fold_single_use(body):
             st.targets = [t if isinstance(t, CG.LocalName) else sub(t) for t in st.targets]
             st.values = CG.map_multi(st.values, lambda x: v if isinstance(x, CG.LocalName)
                                      and x.name == name else None)
-        # bookkeeping: x's reads in st are gone, V's reads now happen in st
+
         nreads[name] = nreads.get(name, 0) - raw_in_st
         writes[name] = writes.get(name, 0) - 1
         if where is not None:
@@ -513,7 +477,7 @@ def fold_single_use(body):
         if len(tnames) != len(prev_st.targets) or tnames.count(x.name) != 1 or y.name in tnames:
             return False
         if in_text(x.name):
-            return False        # a closure reads x
+            return False        
         if any(isinstance(e, CG.LocalName) and e.name in (x.name, y.name)
                for v in prev_st.values.items for e in CG.walk(v)):
             return False
@@ -539,7 +503,7 @@ def fold_single_use(body):
                 b[:] = run(b)
             if out and try_coalesce(out[-1], st):
                 continue
-            # (blank-line markers between x = V and its use are no statement)
+
             blanks = []
             if not isinstance(st, CG.CommentS):
                 while out and isinstance(out[-1], CG.CommentS) and not out[-1].text:
@@ -551,14 +515,14 @@ def fold_single_use(body):
                 folded = True
             if not folded:
                 out += reversed(blanks)
-            # (a call in V could reach x through a closure: then x must exist first)
+
             if out and not (isinstance(st, CG.AssignS) and len(st.targets) == 1
                             and isinstance(st.targets[0], CG.Index)
                             and isinstance(st.targets[0].obj, CG.LocalName)
                             and in_text(st.targets[0].obj.name)
                             and any(CG.has_side_effects(x) for x in st.values.items)) \
                     and _fold_table_store(out[-1], st):
-                # bookkeeping: st's reads now happen in out[-1]; its read of x is gone
+
                 tname = st.targets[0].obj.name
                 nreads[tname] = nreads.get(tname, 0) - 1
                 if where is not None:
@@ -573,7 +537,6 @@ def fold_single_use(body):
         return ST.SBlock(out) if isinstance(stmts, ST.SBlock) else out
 
     return run(body)
-
 
 def loop_vars(stmts):
     """for k, v in f() where v is never read -> for k in f(); an unused first
@@ -598,20 +561,18 @@ def loop_vars(stmts):
             st.forinfo = (vs, it)
     return stmts
 
-
 def _truth(e):
     """Simplify an expression used only for its truthiness."""
     if isinstance(e, Bin) and e.op in ("And", "Or"):
         a, b = _truth(e.a), _truth(e.b)
         if e.op == "And" and isinstance(b, CG.Const) and b.v is True:
-            return a                        # x and true
+            return a                        
         if e.op == "Or" and isinstance(b, CG.Const) and b.v is False:
-            return a                        # x or false
+            return a                        
         return Bin(e.op, a, b)
     if isinstance(e, Un) and e.op == "Not" and isinstance(e.a, Un) and e.a.op == "Not":
-        return _truth(e.a.a)                # not not x
+        return _truth(e.a.a)                
     return e
-
 
 def conditions(stmts):
     for st in stmts:
@@ -623,7 +584,6 @@ def conditions(stmts):
             conditions(b)
     return stmts
 
-
 def _has_continue(stmts):
     """A `continue` of the enclosing loop (not of loops nested in stmts)."""
     for st in stmts:
@@ -633,11 +593,9 @@ def _has_continue(stmts):
             return True
     return False
 
-
 def _only_break(block):
     real = [x for x in block if not (isinstance(x, CG.CommentS) and not x.text)]
     return len(real) == 1 and isinstance(real[0], ST.SBreak)
-
 
 def while_cond(stmts):
     """while true do if C then break end ... end  ->  while not C do ... end
@@ -652,13 +610,13 @@ def while_cond(stmts):
             while_cond(st.body)
             if st.kind != "while" or not st.body:
                 continue
-            # (empty comments are blank-line markers)
+
             body = [x for x in st.body if not (isinstance(x, CG.CommentS) and not x.text)]
             if not body:
                 continue
             first = body[0]
             if isinstance(first, ST.SIf):
-                # (empty comments are blank-line markers)
+
                 first.then[:] = [x for x in first.then if not (isinstance(x, CG.CommentS) and not x.text)]                     if _only_break(first.then) else first.then
                 first.els[:] = [x for x in first.els if not (isinstance(x, CG.CommentS) and not x.text)]                     if _only_break(first.els) else first.els
             if isinstance(first, ST.SIf) and len(first.then) == 1 and isinstance(first.then[0], ST.SBreak):
@@ -675,7 +633,6 @@ def while_cond(stmts):
                 st.body = ST.SBlock(list(body[:-1]))
     return stmts
 
-
 def strip_trailing_continue(stmts):
     """A `continue` that is the last thing an iteration does says nothing."""
     def tail(block):
@@ -691,14 +648,12 @@ def strip_trailing_continue(stmts):
             strip_trailing_continue(b)
     return stmts
 
-
 def strip_trailing_return(body):
     """A bare `return` as the last statement of a function says nothing."""
     if body and isinstance(body[-1], ST.SReturn) and (
             body[-1].values is None or (not body[-1].values.items and body[-1].values.tail is None)):
         body.pop()
     return body
-
 
 def _map_stmt_exprs(st, fn):
     """replace sub-expressions of a statement's own expressions (fn as in
@@ -726,13 +681,11 @@ def _map_stmt_exprs(st, fn):
     elif isinstance(st, ST.SReturn) and st.values is not None:
         st.values = CG.map_multi(st.values, fn)
 
-
 def _map_body(stmts, fn):
     for st in stmts:
         _map_stmt_exprs(st, fn)
         for b in _sub_blocks(st):
             _map_body(b, fn)
-
 
 def inline_const_locals(body, params=()):
     """A local written once, with a number, boolean or short string literal,
@@ -774,15 +727,13 @@ def inline_const_locals(body, params=()):
                 return Const(v) if isinstance(x, CG.LocalName) and x.name == nm else None
             _map_body(stmts[i + 1:], fn)
             del stmts[i]
-        # (a copy of an inlined local is a literal now: `b = a` -> `b = 1`)
+
         reads, writes, text = name_counts(body)
         nested = "\n".join(text)
     return body
 
-
 def _blank(block):
     return all(isinstance(x, CG.CommentS) and not x.text for x in block)
-
 
 def drop_blank_branches(stmts):
     """An if branch holding only blank-line markers (empty comments: code

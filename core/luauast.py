@@ -1,16 +1,3 @@
-"""
-Luau source <-> luau-ast JSON: `parse(text)` runs bin/luau-ast and returns
-the AST as dicts; `render(node)` prints a statement block / expression back
-as indented Luau (one statement per line, elseif chains flattened, explicit
-parentheses kept as the AST's AstExprGroup). For reading obfuscated one-line
-VMs (StyLua overflows its stack on their nesting) and for static analysis.
-
-Deep nesting: call through backend.run_big_stack (or `main`, which does).
-String constants: luau-ast prints raw bytes, so the JSON is decoded as
-latin-1 and every str here is a byte string in disguise (chr(0..255)).
-
-    python deobf/luauast.py file.lua > pretty.lua
-"""
 import json
 import os
 import subprocess
@@ -26,7 +13,6 @@ BINOPS = {
 }
 UNOPS = {"Not": "not ", "Minus": "-", "Len": "#"}
 
-
 def parse(text):
     """AST dict of Luau source `text` (latin-1 str)."""
     fd, path = tempfile.mkstemp(suffix=".lua")
@@ -39,7 +25,6 @@ def parse(text):
     finally:
         os.remove(path)
     return json.loads(out.decode("latin-1"))["root"]
-
 
 def quote(s):
     out = ['"']
@@ -58,7 +43,6 @@ def quote(s):
     out.append('"')
     return "".join(out)
 
-
 def num(v):
     if isinstance(v, float) and v.is_integer() and abs(v) < 2 ** 53:
         return str(int(v))
@@ -70,13 +54,11 @@ def num(v):
         return "(0/0)"
     return repr(v)
 
-
 class Printer:
     def __init__(self, indent="  "):
         self.ind = indent
         self.lines = []
 
-    # expressions ---------------------------------------------------------
     def expr(self, e, depth=0):
         t = e["type"]
         if t == "AstExprConstantNumber":
@@ -142,8 +124,7 @@ class Printer:
         return "(" + s + ")"
 
     def operand(self, e, depth):
-        # the AST keeps source parentheses as AstExprGroup; nested operators
-        # without a group bind as written, parenthesize them to be safe
+
         s = self.expr(e, depth)
         if e["type"] in ("AstExprBinary", "AstExprIfElse", "AstExprFunction"):
             return "(" + s + ")"
@@ -158,7 +139,6 @@ class Printer:
         body = "\n".join(sub.lines)
         return head + "(" + ", ".join(params) + ")\n" + body + ("\n" if body else "") + self.ind * depth + "end"
 
-    # statements ----------------------------------------------------------
     def emit(self, depth, text):
         self.lines.append(self.ind * depth + text)
 
@@ -234,7 +214,6 @@ class Printer:
         else:
             raise ValueError("unknown statement " + t)
 
-
 def render(node, indent="  "):
     p = Printer(indent)
     if node["type"] == "AstStatBlock":
@@ -245,13 +224,11 @@ def render(node, indent="  "):
         return p.expr(node)
     return "\n".join(p.lines)
 
-
 def main():
     import backend
     src = open(sys.argv[1], encoding="latin-1").read()
     text = backend.run_big_stack(lambda: render(parse(src)))
     sys.stdout.buffer.write((text + "\n").encode("latin-1"))
-
 
 if __name__ == "__main__":
     sys.path.insert(0, HERE)

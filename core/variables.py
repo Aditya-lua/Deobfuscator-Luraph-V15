@@ -1,27 +1,6 @@
-"""
-Variable recovery for the devirtualizer.
-
-The VM reuses registers for unrelated locals, so register numbers are not
-variables. Here:
-
-  webs()        per register, reaching definitions over the CFG; every use
-                joins the definitions that reach it (union-find). Each web
-                is one source variable. Registers read with no definition
-                reaching them are nil (Luraph relies on fresh frames).
-  rename()      Reg(n) occurrences -> LocalName(web name); for-loop variables
-                and closure captures included.
-  declare()     on the structured AST: each variable gets `local` in the
-                innermost block that contains all its occurrences (at its
-                first plain assignment there, `local x = v`), hoisted out of
-                loops whose iterations carry its value.
-"""
 import codegen as CG
 import structure as ST
 from luasym import Reg, Const, Pseudo, ClosureExpr, LTable, Global
-
-
-# --------------------------------------------------------------------------
-# occurrences on the CFG
 
 def closure_regs(c):
     """Parent registers a ClosureExpr captures by reference (boxes)."""
@@ -37,7 +16,6 @@ def closure_regs(c):
             out.append(e.n)
     return out + list(getattr(c, "frame_regs", ()))
 
-
 def closure_ref_regs(c):
     """Only the by-reference captures (these keep the local shared)."""
     out = []
@@ -50,7 +28,6 @@ def closure_ref_regs(c):
                 out += [v for v in vals if isinstance(v, int)][:1]
     return out + list(getattr(c, "frame_regs", ()))
 
-
 def expr_reg_occ(e):
     """Registers read by an expression, including closure captures."""
     out = []
@@ -60,7 +37,6 @@ def expr_reg_occ(e):
         elif isinstance(x, ClosureExpr):
             out += closure_regs(x)
     return out
-
 
 def stmt_io(st):
     """(uses, defs) of registers for one simplified statement."""
@@ -88,7 +64,6 @@ def stmt_io(st):
             uses += expr_reg_occ(v)
     return uses, defs
 
-
 def term_io(b):
     uses, defs = [], []
     if b.kind == "cond":
@@ -103,7 +78,6 @@ def term_io(b):
     elif b.kind == "forin":
         defs += list(b.values[0])
     return uses, defs
-
 
 class UF:
     def __init__(self):
@@ -122,7 +96,6 @@ class UF:
         if a != b:
             self.p[b] = a
 
-
 def stmt_caps(st):
     """(captured-by-reference registers, closed registers) of a statement."""
     caps, closes = [], []
@@ -134,7 +107,6 @@ def stmt_caps(st):
                 if isinstance(x, ClosureExpr):
                     caps += closure_ref_regs(x)
     return caps, closes
-
 
 def stmt_exprs(st):
     """Every expression of a simplified statement (targets included)."""
@@ -155,7 +127,6 @@ def stmt_exprs(st):
         out += list(st.exprs)
     return out
 
-
 def term_exprs(b):
     out = []
     if b.kind == "cond":
@@ -165,7 +136,6 @@ def term_exprs(b):
         if b.values.tail is not None:
             out.append(CG.TailRef(b.values.tail))
     return out
-
 
 def webs(entry, blocks):
     """Returns (use_web, def_web): maps from occurrence ids to web ids.
@@ -214,7 +184,7 @@ def webs(entry, blocks):
                 cur[r] = frozenset([("d", bid, i, r)])
             elif k == "c":
                 if not cur.get(r):
-                    # captured before any assignment: the local exists (nil)
+
                     cur[r] = frozenset([("c", bid, i, r)])
                 cur[("o", r)] = cur.get(("o", r), frozenset()) | cur.get(r, frozenset())
             elif k == "x":
@@ -278,14 +248,13 @@ def webs(entry, blocks):
         def_web[k] = uf.find(k)
     return use_web, def_web
 
-
 def rename(entry, blocks, prefix, captured):
     """Replace registers by LocalName variables. Returns {web: name}.
     `captured`: registers captured by closures (never split: one variable)."""
     use_web, def_web = webs(entry, blocks)
     names = {}
     counter = {}
-    # webs defined by for-loop headers stay separate variables
+
     forwebs = set()
     for b in blocks.values():
         if b.kind in ("for", "forin"):
@@ -334,13 +303,12 @@ def rename(entry, blocks, prefix, captured):
         return w is not None and w not in used and reg not in captured
 
     for b in blocks.values():
-        # dead stores: a register assignment nobody reads (Luraph clears
-        # registers when locals go out of scope)
+
         keep = []
         for i, st in enumerate(b.stmts):
             if isinstance(st, CG.AssignS) and len(st.targets) == 1 and isinstance(st.targets[0], Reg)                     and dead(b.id, i, st.targets[0].n):
                 vals = st.values
-                # Luraph's vararg pack (table.pack(...)) is pure
+
                 pure_pack = len(vals.items) == 1 and isinstance(vals.items[0], CG.CallE) and \
                     isinstance(vals.items[0].fn, Global) and vals.items[0].fn.name == "table.pack"
                 if vals.tail is None and len(vals.items) == 1 and (pure_pack or (
@@ -378,15 +346,11 @@ def rename(entry, blocks, prefix, captured):
         elif b.kind == "ret" and b.values is not None:
             b.values = CG.map_multi(b.values, fu)
         elif b.kind == "for":
-            # (the header expressions were renamed with their ForPrepS)
+
             b.values = (ren_def(b.id, n, b.values[0]), b.values[1])
         elif b.kind == "forin":
             b.values = ([ren_def(b.id, n, v) for v in b.values[0]], b.values[1])
     return names
-
-
-# --------------------------------------------------------------------------
-# declarations on the structured AST
 
 def names_in_expr(e):
     out = []
@@ -396,7 +360,6 @@ def names_in_expr(e):
         elif isinstance(x, CG.FuncE):
             out += list(getattr(x, "captures", ()))
     return out
-
 
 def stmt_names(st):
     """(names read, names written) directly by a simple statement."""
@@ -429,7 +392,6 @@ def stmt_names(st):
             reads += names_in_expr(CG.TailRef(st.values.tail))
     return reads, writes
 
-
 def occurrences(stmts, path, occ):
     """occ[name] -> list of paths (tuple of (block id, index)) where the name occurs."""
     for i, st in enumerate(stmts):
@@ -459,7 +421,6 @@ def occurrences(stmts, path, occ):
             for n in r + w:
                 occ.setdefault(n, []).append(here)
 
-
 def loop_vars(stmts, out):
     for st in stmts:
         if isinstance(st, ST.SIf):
@@ -471,7 +432,6 @@ def loop_vars(stmts, out):
             elif st.kind == "forin":
                 out |= {v.name for v in st.forinfo[0]}
             loop_vars(st.body, out)
-
 
 def exposed_reads(stmts):
     """Names read before being definitely assigned (in execution order)."""
@@ -504,7 +464,6 @@ def exposed_reads(stmts):
     run(stmts, set())
     return exposed
 
-
 def declare(body, params=(), own=None):
     """Insert `local` declarations; returns the body. `own`: the names of
     this function's variables (anything else is an upvalue: not declared)."""
@@ -513,7 +472,7 @@ def declare(body, params=(), own=None):
     fvars = set()
     loop_vars(body, fvars)
     blocks_by_id = {}
-    carried = {}       # loop body block id -> names carried across iterations
+    carried = {}       
 
     def index(stmts):
         blocks_by_id[id(stmts)] = stmts
@@ -529,8 +488,7 @@ def declare(body, params=(), own=None):
     assigned = set()
     assigned_names(body, assigned)
     for name, paths in occ.items():
-        # (a register captured by reference keeps one name: it can be a
-        # loop variable somewhere and a plain local elsewhere)
+
         if (name in fvars and name not in assigned) or name in params or (own is not None and name not in own):
             continue
         common = list(paths[0])
@@ -539,7 +497,7 @@ def declare(body, params=(), own=None):
             while k < len(common) and k < len(p) and common[k] == p[k]:
                 k += 1
             del common[k:]
-        # start at the root block: where do all occurrences continue?
+
         blk = id(body)
         at = None
         depth = 0
@@ -550,7 +508,7 @@ def declare(body, params=(), own=None):
                 break
             bid = nb.pop()
             if bid != blk:
-                # entering a sub-block of the common statement above
+
                 if bid in carried and name in carried[bid]:
                     break
                 blk = bid
@@ -567,12 +525,12 @@ def declare(body, params=(), own=None):
         at = {}
         for idx, name in lst:
             at.setdefault(idx, []).append(name)
-        # from the end, so earlier insertions don't shift later indexes
+
         for idx in sorted(at, reverse=True):
             names = at[idx]
             st = stmts[idx] if idx < len(stmts) else None
             if isinstance(st, CG.AssignS) and not getattr(st, "is_local", False)                     and all(isinstance(t, CG.LocalName) for t in st.targets)                     and sorted(t.name for t in st.targets) == sorted(names)                     and len(set(names)) == len(names)                     and not set(names) & set(stmt_names_values(st)):
-                # `local a, b = f()`: every target is declared right here
+
                 st.is_local = True
                 continue
             if isinstance(st, CG.AssignS) and not getattr(st, "is_local", False) and len(st.targets) == 1                     and isinstance(st.targets[0], CG.LocalName) and st.targets[0].name in names                     and st.targets[0].name not in stmt_names_values(st):
@@ -582,22 +540,13 @@ def declare(body, params=(), own=None):
                 stmts.insert(idx, CG.LocalS(names, None))
     return body
 
-
 def stmt_names_values(st):
     """Names an assignment reads (its values and the lvalue sub-expressions)."""
     return stmt_names(st)[0]
 
-
-# --------------------------------------------------------------------------
-# Luau allows 200 active locals per function. The original source used
-# scopes (do ... end, nested blocks) that leave no trace in the bytecode, so
-# a big block can end up with too many declarations: wrap closed segments
-# (every variable declared inside is dead after it) in do ... end.
-
 class DoBlock:
     def __init__(self, body):
         self.body = body
-
 
 def assigned_names(stmts, out, bound=frozenset()):
     """Names plain assignments write outside the loops that bind them as
@@ -618,7 +567,6 @@ def assigned_names(stmts, out, bound=frozenset()):
         elif isinstance(st, CG.AssignS):
             out.update(t.name for t in st.targets if isinstance(t, CG.LocalName) and t.name not in bound)
 
-
 def declared_here(st):
     if isinstance(st, CG.LocalS):
         return list(st.names)
@@ -626,12 +574,10 @@ def declared_here(st):
         return [t.name for t in st.targets if isinstance(t, CG.LocalName)]
     return []
 
-
 def names_anywhere(st):
     occ = {}
     occurrences(st.body if isinstance(st, DoBlock) else [st], (), occ)
     return set(occ)
-
 
 def limit_locals(stmts, outer=0, budget=180):
     """Keep the locals active at any point (enclosing blocks' + this block's)
@@ -639,7 +585,7 @@ def limit_locals(stmts, outer=0, budget=180):
     total = sum(len(declared_here(s)) for s in stmts)
     if outer + total > budget:
         stmts = fit_locals(stmts, budget - outer)
-    # recurse with the number of locals active at each nested statement
+
     active = outer
     for st in stmts:
         if isinstance(st, ST.SIf):
@@ -653,7 +599,6 @@ def limit_locals(stmts, outer=0, budget=180):
         active += len(declared_here(st))
     return stmts
 
-
 def _hoistable(st):
     """Names this statement declares that can be declared earlier instead
     (a bare `local a, b` or `local a, b = ...` assignment)."""
@@ -662,7 +607,6 @@ def _hoistable(st):
     if isinstance(st, CG.AssignS) and getattr(st, "is_local", False):
         return [t.name for t in st.targets if isinstance(t, CG.LocalName)]
     return []
-
 
 def _unlocalize(stmts, hoisted):
     """The statements with the declarations of `hoisted` names removed: they
@@ -683,7 +627,6 @@ def _unlocalize(stmts, hoisted):
         out.append(st)
     return out
 
-
 def fit_locals(stmts, room):
     """The block with at most `room` locals active at once (as far as
     possible): small do ... end segments (wrap_segments) when they get there,
@@ -695,7 +638,6 @@ def fit_locals(stmts, room):
         if got is not None:
             return got
     return wrap_segments(stmts, room)
-
 
 def split_block(stmts, room):
     """Cut a block with too many locals into a closed prefix, wrapped in
@@ -716,7 +658,7 @@ def split_block(stmts, room):
         for nm in decl_at[i]:
             first.setdefault(nm, i)
         hoistable.update(_hoistable(s))
-    # names declared in stmts[:k] and used in stmts[k:], per k (difference arrays)
+
     cross_d = [0] * (n + 2)
     bad_d = [0] * (n + 2)
     for nm, f in first.items():
@@ -748,7 +690,6 @@ def split_block(stmts, room):
     out.append(DoBlock(fit_locals(_unlocalize(stmts[:k], hoisted), room2)))
     return out + fit_locals(stmts[k:], room2)
 
-
 def _segments(stmts, decl_at, last, hoisted):
     """Maximal closed segments: no variable declared inside (and not hoisted)
     is used after the segment. Returns [(start, end_exclusive, n_decls)]."""
@@ -766,7 +707,6 @@ def _segments(stmts, decl_at, last, hoisted):
     if start < len(stmts):
         segs.append((start, len(stmts), cnt))
     return segs
-
 
 def wrap_segments(stmts, room, chunk=None, dry=False):
     """The original source used scopes (do ... end, nested blocks) that leave
@@ -796,20 +736,20 @@ def wrap_segments(stmts, room, chunk=None, dry=False):
         worst = max((c for _, _, c in segs), default=0)
         if worst <= chunk or k >= len(life) or len(hoisted) + chunk >= room:
             break
-        # hoist a batch of the longest-lived remaining locals
+
         for _ in range(max(1, len(life) // 50)):
             if k < len(life):
                 hoisted.add(life[k][1])
                 k += 1
     if dry:
-        # (no changes made) an upper bound of the locals active at once afterwards
+
         def wraps(a, b, c):
             return c >= 1 and 1 < b - a < n
         inner = [c for a, b, c in segs if wraps(a, b, c)]
         return len(hoisted) + sum(c for a, b, c in segs if not wraps(a, b, c)) + max(inner, default=0)
-    rest = {}   # un-localized `local a, b = f()` -> its targets that stay put
+    rest = {}   
     if hoisted:
-        # only hoist what actually lets a segment close; keep the rest in place
+
         for st in stmts:
             if isinstance(st, CG.LocalS):
                 st.names = [x for x in st.names if x not in hoisted]
@@ -840,11 +780,6 @@ def wrap_segments(stmts, room, chunk=None, dry=False):
             break
     return out
 
-
-# --------------------------------------------------------------------------
-# parameters: Luraph functions take `...` and copy their parameters out of it
-# first thing. Leading `local x = <vararg i>` (i = 1, 2, ...) become params.
-
 def extract_params(body):
     """Luraph functions take `...` and copy their parameters out of it first
     thing: leading `local x = <vararg i>` become named parameters (gaps get
@@ -862,7 +797,7 @@ def extract_params(body):
             i += 1
             continue
         break
-    # (a parameter may be reassigned later: parameters are plain locals)
+
     idx, tails = [], []
     vararg_uses(body[i:], idx, tails)
     top = max(list(lead) + idx + [0])
@@ -898,7 +833,6 @@ def extract_params(body):
         params = params + ["..."]
     return params
 
-
 def written_names(stmts, out):
     for st in stmts:
         if isinstance(st, ST.SIf):
@@ -915,7 +849,6 @@ def written_names(stmts, out):
         else:
             out |= set(stmt_names(st)[1])
 
-
 def vararg_uses(stmts, idx, tails):
     from luasym import Vararg, VarargTail
 
@@ -926,7 +859,6 @@ def vararg_uses(stmts, idx, tails):
             tails.append(x.tail.start)
         return None
     map_body(stmts, f, set(), inspect_only=True)
-
 
 def map_body(stmts, fn, done, inspect_only=False):
     """Apply CG.map_expr(e, fn) to every expression of a structured body
@@ -982,7 +914,6 @@ def map_body(stmts, fn, done, inspect_only=False):
         elif isinstance(st, CG.SetListS):
             st.tbl = me(st.tbl)
             st.values = mm(st.values)
-
 
 def uses_varargs(stmts):
     from luasym import Vararg, VarargTail

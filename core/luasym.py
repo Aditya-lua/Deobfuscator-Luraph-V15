@@ -1,27 +1,8 @@
-"""
-Symbolic Luau interpreter over luau-ast JSON, used by devirt.py to lift
-Luraph VM instructions.
-
-The devirtualizer runs one iteration of the *real* dispatch loop per VM
-instruction: operand arrays and helpers are concrete (captured at runtime),
-registers are symbolic. Concrete code (instruction decoders, the if-tree that
-selects the handler) just runs; symbolic values build IR expressions, and a
-branch on a symbolic condition forks the run (see Interp.run_paths).
-
-Values:
-  None, bool, int/float, bytes (Lua strings), LTable, Builtin, LuaFunc, Buf
-  and symbolic IR expressions (Expr subclasses, see below).
-"""
 import math
 import struct
 
-
 class Unsupported(Exception):
     pass
-
-
-# --------------------------------------------------------------------------
-# concrete values
 
 class LTable:
     __slots__ = ("h", "tid", "meta")
@@ -50,13 +31,11 @@ class LTable:
     def __repr__(self):
         return "LTable#%s" % (self.tid if self.tid is not None else id(self))
 
-
 class Buf:
     __slots__ = ("data",)
 
     def __init__(self, data):
         self.data = bytearray(data)
-
 
 class Builtin:
     __slots__ = ("name", "fn")
@@ -68,7 +47,6 @@ class Builtin:
     def __repr__(self):
         return "Builtin(%s)" % self.name
 
-
 class LuaFunc:
     """A Lua function from the source AST (VM helpers such as e:G3)."""
     __slots__ = ("node", "env")
@@ -77,17 +55,14 @@ class LuaFunc:
         self.node = node
         self.env = env
 
-
 def norm_key(k):
+    if type(k) is int or type(k) is bytes:
+        return k
     if isinstance(k, float) and k == int(k) and not math.isinf(k):
         return int(k)
     if isinstance(k, Expr):
         raise Unsupported("symbolic table key on a concrete table: %r" % (k,))
     return k
-
-
-# --------------------------------------------------------------------------
-# symbolic IR expressions
 
 class Expr:
     """Symbolic value. Subclasses are plain data; `pure` means evaluation has
@@ -97,11 +72,9 @@ class Expr:
     def __repr__(self):
         return "<%s %s>" % (type(self).__name__, self.__dict__)
 
-
 class Const(Expr):
     def __init__(self, v):
         self.v = v
-
 
 class Reg(Expr):
     def __init__(self, n):
@@ -112,7 +85,6 @@ class Reg(Expr):
 
     def __hash__(self):
         return hash(("reg", self.n))
-
 
 class Pseudo(Expr):
     """Hidden VM state (numeric/generic for-loop variables), per loop depth."""
@@ -126,11 +98,9 @@ class Pseudo(Expr):
     def __hash__(self):
         return hash(("pseudo", self.name, self.depth))
 
-
 class Global(Expr):
     def __init__(self, name):
         self.name = name
-
 
 class Upval(Expr):
     def __init__(self, idx):
@@ -142,26 +112,21 @@ class Upval(Expr):
     def __hash__(self):
         return hash(("upv", self.idx))
 
-
 class Index(Expr):
     def __init__(self, obj, key):
         self.obj, self.key = obj, key
-
 
 class Bin(Expr):
     def __init__(self, op, a, b):
         self.op, self.a, self.b = op, a, b
 
-
 class Un(Expr):
     def __init__(self, op, a):
         self.op, self.a = op, a
 
-
 class IfExp(Expr):
     def __init__(self, c, a, b):
         self.c, self.a, self.b = c, a, b
-
 
 class TempVal(Expr):
     """i-th value (1-based) of a materialized call."""
@@ -175,25 +140,20 @@ class TempVal(Expr):
     def __hash__(self):
         return hash(("tv", self.t, self.i))
 
-
 class Vararg(Expr):
     """i-th value of the function's varargs (1-based)."""
 
     def __init__(self, i):
         self.i = i
 
-
 class NewTable(Expr):
     def __init__(self, items=None):
-        self.items = items or []   # [(key or None, value)]
-
+        self.items = items or []   
 
 class ClosureExpr(Expr):
     def __init__(self, proto, upvals):
         self.proto, self.upvals = proto, upvals
 
-
-# multi-value tails (a variable number of values)
 class Multi:
     """Values of a call / vararg expression: fixed prefix + optional tail."""
 
@@ -207,7 +167,6 @@ class Multi:
             return self.tail.at(1)
         return None
 
-
 class TempTail:
     def __init__(self, t, start=1):
         self.t, self.start = t, start
@@ -218,7 +177,6 @@ class TempTail:
     def drop(self, k):
         return TempTail(self.t, self.start + k)
 
-
 class VarargTail:
     def __init__(self, start=1):
         self.start = start
@@ -228,7 +186,6 @@ class VarargTail:
 
     def drop(self, k):
         return VarargTail(self.start + k)
-
 
 class SymList:
     """A table built by table.pack / {...} whose length may be symbolic:
@@ -246,22 +203,15 @@ class SymList:
             return len(self.items)
         return Bin("Add", TailCount(self.tail), len(self.items)) if self.items else TailCount(self.tail)
 
-
 class TailCount(Expr):
     def __init__(self, tail):
         self.tail = tail
 
-
-# --------------------------------------------------------------------------
-# special runtime objects of the VM closure
-
 class RegFile:
     """The VM register array: z[n] reads Reg(n), writes emit assignments."""
 
-
 class EnvTable:
     """getfenv() of the script: indexing gives globals."""
-
 
 class UpContainer:
     """Stand-in for the table an upvalue box points into (box[4] in Luraph's
@@ -270,22 +220,15 @@ class UpContainer:
     def __init__(self, idx):
         self.idx = idx
 
-
-# --------------------------------------------------------------------------
-# control-flow signals
-
 class BreakSig(Exception):
     pass
-
 
 class ContinueSig(Exception):
     pass
 
-
 class ReturnSig(Exception):
     def __init__(self, values):
         self.values = values
-
 
 class YieldSig(Exception):
     """Reached a dispatch loop (instruction boundary)."""
@@ -293,20 +236,14 @@ class YieldSig(Exception):
     def __init__(self, node):
         self.node = node
 
-
 class NeedDecision(Exception):
     pass
-
-
-# --------------------------------------------------------------------------
 
 def truthy(v):
     return not (v is None or v is False)
 
-
 def is_sym(v):
     return isinstance(v, Expr)
-
 
 def lua_num(v):
     if isinstance(v, bool) or v is None:
@@ -321,12 +258,10 @@ def lua_num(v):
             return None
     return None
 
-
 def fix_int(x):
     if isinstance(x, float) and x.is_integer() and abs(x) < 2 ** 63:
         return int(x)
     return x
-
 
 def arith(op, a, b):
     if op == "Add":
@@ -358,10 +293,8 @@ def arith(op, a, b):
         return fix_int(float(a) ** float(b))
     raise Unsupported(op)
 
-
 def u32(x):
     return int(x) & 0xFFFFFFFF
-
 
 def _bit(name):
     def band(*a):
@@ -426,10 +359,8 @@ def _bit(name):
 
     return locals()[name]
 
-
 BIT32 = ["band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "lrotate", "rrotate",
          "extract", "replace", "btest", "countlz", "countrz"]
-
 
 def _buf_fns():
     fmt = {"i8": "<b", "u8": "<B", "i16": "<h", "u16": "<H", "i32": "<i", "u32": "<I", "f32": "<f", "f64": "<d"}
@@ -456,7 +387,6 @@ def _buf_fns():
     out["buffer.readstring"] = lambda b, o, n: bytes(b.data[int(o):int(o) + int(n)])
     return out
 
-
 def _str_byte(s, i=1, j=None):
     n = len(s)
     i = int(i)
@@ -468,7 +398,6 @@ def _str_byte(s, i=1, j=None):
     i = max(i, 1)
     j = min(j, n)
     return Multi(list(s[i - 1:j]))
-
 
 def _str_sub(s, i=1, j=-1):
     n = len(s)
@@ -483,7 +412,6 @@ def _str_sub(s, i=1, j=-1):
         j = n
     return s[i - 1:j] if i <= j else b""
 
-
 CONCRETE = {"string.byte": _str_byte, "string.sub": _str_sub, "string.len": lambda s: len(s),
             "string.char": lambda *a: bytes(int(x) for x in a),
             "string.rep": lambda s, n, sep=b"": sep.join([s] * int(n)),
@@ -493,9 +421,6 @@ CONCRETE = {"string.byte": _str_byte, "string.sub": _str_sub, "string.len": lamb
 for _n in BIT32:
     CONCRETE["bit32." + _n] = _bit(_n)
 CONCRETE.update(_buf_fns())
-
-
-# --------------------------------------------------------------------------
 
 class Scope:
     """Local variables keyed by declaration location (luau-ast)."""
@@ -513,7 +438,6 @@ class Scope:
             s = s.parent
         return None
 
-
 class Interp:
     """Evaluates AST nodes. Hooks for the VM-specific parts:
       special[decl_key] -> "sink" (reads nil, writes ignored) or
@@ -526,11 +450,10 @@ class Interp:
         self.L = lifter
         self.decisions = []
         self.dpos = 0
-        self.dlog = []          # (decision index, emitted count at that time, cond)
-        self.seen = {}          # id(cond) -> (cond, decision) in this run
+        self.dlog = []          
+        self.seen = {}          
         self.steps = 0
 
-    # ---- decisions (forking on symbolic conditions)
     def decide(self, cond):
         if self.dpos < len(self.decisions):
             d = self.decisions[self.dpos]
@@ -543,8 +466,7 @@ class Interp:
 
     def cond_true(self, v):
         if is_sym(v):
-            # the same value tested again (`c and x or y` tests c twice):
-            # the same decision, not a fork into an infeasible combination
+
             base, neg = v, False
             while isinstance(base, Un) and base.op == "Not":
                 base, neg = base.a, not neg
@@ -559,7 +481,6 @@ class Interp:
             return True
         return truthy(v)
 
-    # ---- variables
     def getvar(self, scope, local):
         key = local["location"]
         sp = self.L.special.get(key)
@@ -581,7 +502,6 @@ class Interp:
             raise Unsupported("assign to unbound local %s" % local["name"])
         s.vars[key] = v
 
-    # ---- statements
     def exec_block(self, stmts, scope):
         for st in stmts:
             self.exec_stmt(st, scope)
@@ -599,10 +519,10 @@ class Interp:
                 scope.vars[v["location"]] = x
                 sp = self.L.special.get(v["location"])
                 if sp is not None and sp[0] == "reg":
-                    # a register local (LPH_JIT) is assigned where it is declared
+
                     self.L.special_set(sp, x, self)
         elif t == "AstStatAssign":
-            # evaluate targets' object/key first, then values (Lua order is unspecified; fine)
+
             targets = [self.lvalue(v, scope) for v in st["vars"]]
             vals = self.eval_list(st["values"], scope, len(targets))
             if len(targets) > 1 and hasattr(self.L, "parallel_values"):
@@ -714,7 +634,6 @@ class Interp:
         else:
             raise Unsupported("statement " + t)
 
-    # ---- lvalues: ("local", node) | ("index", obj, key)
     def lvalue(self, node, scope):
         t = node["type"]
         if t == "AstExprLocal":
@@ -722,7 +641,11 @@ class Interp:
         if t == "AstExprIndexExpr":
             return ("index", self.eval(node["expr"], scope), self.eval(node["index"], scope))
         if t == "AstExprIndexName":
-            return ("index", self.eval(node["expr"], scope), node["index"].encode("latin-1"))
+            idx = node.get("_idx")
+            if idx is None:
+                idx = node["index"].encode("latin-1")
+                node["_idx"] = idx
+            return ("index", self.eval(node["expr"], scope), idx)
         if t == "AstExprGlobal":
             return ("global", node["global"])
         raise Unsupported("lvalue " + t)
@@ -740,12 +663,11 @@ class Interp:
         elif tg[0] == "index":
             self.newindex(tg[1], tg[2], v)
         elif hasattr(self.L, "set_global"):
-            # "Hardcode Globals": a handler stores a script global directly
+
             self.L.set_global(tg[1], v)
         else:
             raise Unsupported("assignment to global %s in VM code" % tg[1])
 
-    # ---- expressions
     def eval_list(self, nodes, scope, want):
         """Evaluate an expression list adjusted to `want` values."""
         vals = self.eval_multi_list(nodes, scope)
@@ -788,9 +710,17 @@ class Interp:
     def eval(self, node, scope):
         t = node["type"]
         if t == "AstExprConstantNumber":
-            return fix_int(node["value"])
+            v = node.get("_v")
+            if v is None:
+                v = fix_int(node["value"])
+                node["_v"] = v
+            return v
         if t == "AstExprConstantString":
-            return node["value"].encode("latin-1")
+            v = node.get("_v")
+            if v is None:
+                v = node["value"].encode("latin-1")
+                node["_v"] = v
+            return v
         if t == "AstExprConstantBool":
             return node["value"]
         if t == "AstExprConstantNil":
@@ -810,7 +740,11 @@ class Interp:
             obj = self.eval(node["expr"], scope)
             if obj is None:
                 raise Unsupported("index nil @%s" % node["location"])
-            return self.index(obj, node["index"].encode("latin-1"))
+            idx = node.get("_idx")
+            if idx is None:
+                idx = node["index"].encode("latin-1")
+                node["_idx"] = idx
+            return self.index(obj, idx)
         if t == "AstExprCall":
             r = self.eval_call(node, scope)
             return r.first() if isinstance(r, Multi) else r
@@ -818,7 +752,7 @@ class Interp:
             return self.L.varargs(scope).first()
         if t == "AstExprBinary":
             op = node["op"]
-            # symbolic operands fork (short-circuit evaluation is control flow)
+
             if op == "And":
                 a = self.eval(node["left"], scope)
                 return self.eval(node["right"], scope) if self.cond_true(a) else a
@@ -841,7 +775,7 @@ class Interp:
 
     def table_ctor(self, node, scope):
         items = node["items"]
-        # {...} and {f()} build SymLists when a tail is involved
+
         tb = LTable()
         pos = 1
         symbolic = False
@@ -870,7 +804,6 @@ class Interp:
             raise Unsupported("symbolic key in table constructor")
         return tb
 
-    # ---- operators
     def binop(self, op, a, b):
         if is_sym(a) or is_sym(b) or isinstance(a, (SymList, RegFile)) or isinstance(b, (SymList, RegFile)):
             return self.L.sym_binop(op, a, b)
@@ -916,14 +849,12 @@ class Interp:
             raise Unsupported("len of %r" % (a,))
         raise Unsupported("unop " + op)
 
-    # ---- indexing
     def index(self, obj, key):
         return self.L.index(obj, key, self)
 
     def newindex(self, obj, key, v):
         self.L.newindex(obj, key, v, self)
 
-    # ---- calls
     def eval_call(self, node, scope, stat=False):
         fnode = node["func"]
         if node.get("self"):
@@ -961,7 +892,6 @@ class Interp:
             return r.values
         return Multi([])
 
-
 def lua_eq(a, b):
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
@@ -970,7 +900,6 @@ def lua_eq(a, b):
     if isinstance(a, bytes) and isinstance(b, bytes):
         return a == b
     return a is b
-
 
 def fmt_num(v):
     if isinstance(v, int):

@@ -1,4 +1,3 @@
-"""Luraph v15 plugin: devirtualizer + behaviour trace (notes: LURAPH.md)."""
 import re
 import sys
 
@@ -8,7 +7,6 @@ HEADER = re.compile(r"This file was protected using Luraph Obfuscator v(\d+)(?:\
 HEADER_LINE = re.compile(r"\s*--[ \t]*This file was protected using Luraph Obfuscator v[\d.]+[ \t]*"
                          r"\[https?://lura\.ph/?\]")
 
-
 class LuraphV15(Obfuscator):
     name = "luraph_v15"
     label = "Luraph v15"
@@ -17,9 +15,8 @@ class LuraphV15(Obfuscator):
     def detect(self, source):
         m = HEADER.search(source[:500])
         if m:
-            return 1.0 if m.group(1) == "15" else 0.3     # other versions: probably close, not verified
-        # header stripped: v15's shape is `return setmetatable({...VM object...}, ...)`
-        # with numeric-keyed library slots (`[75]=bit32.rrotate`) and `LPH` markers
+            return 1.0 if m.group(1) == "15" else 0.3     
+
         head = source.lstrip()[:2000]
         if head.startswith("return setmetatable({") and (
                 re.search(r"\[\d+\]=(bit32|buffer|string|table|math)\.\w+", head) or "LPH" in source[:200000]):
@@ -39,12 +36,11 @@ class LuraphV15(Obfuscator):
         from obfuscators.luraph_v15 import driver
         fixed = restore_header_newline(job.source)
         if fixed != job.source:
-            # the copy keeps the input's name (Path2D cache, messages use job.input)
+
             print("[*] header comment ran into the code (lost newline): split it", file=sys.stderr)
             job.source = fixed
             job.source_path = job.write(job.path(".src.lua"), fixed, encoding="latin-1")
         return driver.run(job)
-
 
 def restore_header_newline(source):
     """Pasted copies (e.g. Discord's message.txt) can lose the newline after

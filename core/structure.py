@@ -1,19 +1,3 @@
-"""
-Structuring for the devirtualizer: instruction graph (devirt.Node trees) ->
-basic blocks -> structured statements (if / while / for / return), then
-Luau source.
-
-Pipeline (see lift_function):
-  build_cfg      Node trees become blocks; decided (opaque-predicate) branches
-                 become plain jumps; empty blocks are threaded away.
-  structure      dominator-based: natural loops become `while true do` with
-                 break/continue, two-way branches become if/else joined at the
-                 immediate post-dominator; anything irreducible falls back to
-                 a `goto`-free state machine.
-  loops.py-ish   numeric/generic `for` recognition on the Pseudo loop state.
-  codegen        expressions, temps folded into their single use, registers
-                 named, locals declared.
-"""
 import copy
 import re
 import sys
@@ -21,12 +5,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import luasym as S  # noqa: E402
-from luasym import Const, Reg, Pseudo, Global, Upval, Index, Bin, Un, TempVal, Vararg, ClosureExpr, Multi  # noqa: E402,F401
-
-
-# --------------------------------------------------------------------------
-# CFG
+import luasym as S  
+from luasym import Const, Reg, Pseudo, Global, Upval, Index, Bin, Un, TempVal, Vararg, ClosureExpr, Multi  
 
 class Block:
     __slots__ = ("id", "stmts", "kind", "cond", "succ", "values", "error", "preds", "origin", "path")
@@ -34,18 +14,17 @@ class Block:
     def __init__(self, bid):
         self.id = bid
         self.stmts = []
-        self.kind = "goto"      # goto | cond | ret | error | end
+        self.kind = "goto"      
         self.cond = None
-        self.succ = []          # goto: [t]; cond: [then, else]
-        self.values = None      # ret: Multi
+        self.succ = []          
+        self.values = None      
         self.error = None
         self.preds = []
-        self.origin = None      # (mode, pc) of the first instruction
-        self.path = ""          # branch path inside the instruction's IR tree (t/e per level)
+        self.origin = None      
+        self.path = ""          
 
     def __repr__(self):
         return "B%s(%s->%s)" % (self.id, self.kind, [b for b in self.succ])
-
 
 def build_cfg(entry_key, order, D, link):
     """order: [(state key, devirt.Node)]; D: the devirt module (IR classes)."""
@@ -80,7 +59,6 @@ def build_cfg(entry_key, order, D, link):
             blocks[s].preds.append(b.id)
     return entry.id, blocks
 
-
 def fill(b, node, key, new_block, head_of, nodes, D, link):
     if getattr(node, "error", None):
         b.stmts += node.stmts
@@ -95,7 +73,7 @@ def fill(b, node, key, new_block, head_of, nodes, D, link):
             fill(b, sub, key, new_block, head_of, nodes, D, link)
             return
         if dec == "unset":
-            # never reached by the propagation (unreachable subtree)
+
             b.kind = "end"
             return
         t = new_block()
@@ -125,9 +103,7 @@ def fill(b, node, key, new_block, head_of, nodes, D, link):
     else:
         b.kind = "end"
 
-
 _TEMP_RE = re.compile(r"\bT([^\s\[\]=(),]+)(?=\[| =)")
-
 
 def _rename_temps(x, m, seen):
     """Rename call temps (TempVal/TempTail/CallStmt .t) inside IR x via map m."""
@@ -147,7 +123,6 @@ def _rename_temps(x, m, seen):
         if d is not None and type(o).__name__ not in ("LTable", "Scope", "LuaFunc"):
             st += [v for v in d.values() if v is not None and not isinstance(v, (str, int, float, bytes, bool))]
 
-
 def merge_equivalent(entry, blocks, D):
     """Merge blocks that behave identically (same statements up to call-temp
     names, same kind/condition, equivalent successors): the walk keys nodes by
@@ -156,8 +131,7 @@ def merge_equivalent(entry, blocks, D):
     such copies make loops irreducible (a second entry into the body).
     Runs on the raw per-instruction CFG, where copies line up one to one."""
     def text(b):
-        # the same instruction only: identical statements at different pcs are
-        # the source's own repetition (merging them makes shared tails)
+
         parts = [repr(b.origin), b.path, b.kind]
         parts += [D.fmt_stmt(s) for s in b.stmts]
         if b.cond is not None:
@@ -172,8 +146,7 @@ def merge_equivalent(entry, blocks, D):
     while True:
         texts, temps, defs = {}, {}, {}
         for bid, b in blocks.items():
-            # (reprs of IR objects without a formatter carry their address:
-            # equal only for the very same object)
+
             tx = text(b)
             order = []
             for mo in _TEMP_RE.finditer(tx):
@@ -210,14 +183,14 @@ def merge_equivalent(entry, blocks, D):
                 r = entry if entry in g else g[0]
                 for bid in g:
                     rep[bid] = r
-            # temp renaming implied by merged defining blocks
+
             rmap = {}
             for bid, r in rep.items():
                 if bid != r:
                     for x, y in zip(temps[bid], temps[r]):
                         if x != y and defs.get(x) == bid:
                             rmap[x] = y
-            # every merged use must then agree: T_a and T_b the same value
+
             bad = set()
             for bid, r in rep.items():
                 if bid == r:
@@ -243,7 +216,6 @@ def merge_equivalent(entry, blocks, D):
                 _rename_temps([b.cond, b.values], rmap, seen)
         recompute_preds(blocks)
 
-
 def thread_empty(entry, blocks):
     """Skip empty goto blocks (dispatcher hops, NOPs); merge straight-line chains."""
     def target(bid, seen=None):
@@ -256,7 +228,7 @@ def thread_empty(entry, blocks):
     entry = target(entry)
     for b in blocks.values():
         b.succ = [target(s) for s in b.succ]
-    # a cond whose both edges lead to the same block is a goto
+
     for b in blocks.values():
         if b.kind == "cond" and b.succ[0] == b.succ[1]:
             b.kind = "goto"
@@ -267,7 +239,7 @@ def thread_empty(entry, blocks):
         if bid not in reach:
             del blocks[bid]
     recompute_preds(blocks)
-    # merge a goto into its single-predecessor successor
+
     changed = True
     while changed:
         changed = False
@@ -284,7 +256,6 @@ def thread_empty(entry, blocks):
             changed = True
     return entry
 
-
 def reachable(entry, blocks):
     seen = set()
     st = [entry]
@@ -296,7 +267,6 @@ def reachable(entry, blocks):
         st += blocks[x].succ
     return seen
 
-
 def recompute_preds(blocks):
     for b in blocks.values():
         b.preds = []
@@ -304,10 +274,6 @@ def recompute_preds(blocks):
         for s in b.succ:
             if s in blocks:
                 blocks[s].preds.append(b.id)
-
-
-# --------------------------------------------------------------------------
-# dominators
 
 def rpo(entry, succ):
     order = []
@@ -326,7 +292,6 @@ def rpo(entry, succ):
             order.append(n)
     order.reverse()
     return order
-
 
 def dominators(entry, succ, preds):
     order = rpo(entry, succ)
@@ -355,7 +320,6 @@ def dominators(entry, succ, preds):
                 changed = True
     return idom, index
 
-
 def dominates(idom, a, b):
     """a dominates b"""
     while True:
@@ -366,18 +330,12 @@ def dominates(idom, a, b):
             return False
         b = nb
 
-
-# --------------------------------------------------------------------------
-# structured AST
-
 class SBlock(list):
     pass
-
 
 class SIf:
     def __init__(self, cond, then, els):
         self.cond, self.then, self.els = cond, then, els
-
 
 class SLoop:
     """while true do body end (refined later into while/repeat/for)."""
@@ -388,24 +346,19 @@ class SLoop:
         self.cond = None
         self.forinfo = None
 
-
 class SBreak:
     pass
 
-
 class SContinue:
     pass
-
 
 class SReturn:
     def __init__(self, values):
         self.values = values
 
-
 class SError:
     def __init__(self, msg):
         self.msg = msg
-
 
 class SCrash(SError):
     """LPH_CRASH() (Luraph's inlined crash: scrambles the VM, loops forever)."""
@@ -413,27 +366,24 @@ class SCrash(SError):
     def __init__(self):
         self.msg = "LPH_CRASH"
 
-
 class SGotoState:
     """Fallback: jump in the state machine used for unstructurable regions."""
 
     def __init__(self, target):
         self.target = target
 
-
 class SStateMachine:
     def __init__(self, entry, cases):
         self.entry, self.cases = entry, cases
-
 
 class Structurer:
     def __init__(self, entry, blocks):
         self.entry = entry
         self.blocks = blocks
-        succ = lambda n: blocks[n].succ  # noqa: E731
-        preds = lambda n: blocks[n].preds  # noqa: E731
+        succ = lambda n: blocks[n].succ  
+        preds = lambda n: blocks[n].preds  
         self.idom, self.rpo_index = dominators(entry, succ, preds)
-        # loops: back edges u -> h where h dominates u
+
         self.loops = {}
         for b in blocks.values():
             for s in b.succ:
@@ -450,7 +400,7 @@ class Structurer:
                 body.add(x)
                 st += [p for p in blocks[x].preds if p in self.idom]
             self.loop_body[h] = body
-        # post-dominators on the reverse graph with a virtual exit (0)
+
         exits = [b.id for b in blocks.values() if not b.succ]
         rsucc = {n: list(blocks[n].preds) for n in blocks}
         rpred = {n: list(blocks[n].succ) for n in blocks}
@@ -458,7 +408,7 @@ class Structurer:
         rpred[0] = []
         for e in exits:
             rpred[e] = rpred[e] + [0]
-        # nodes that cannot reach an exit (endless loops): hang them off the exit too
+
         can = reachable_rev(0, rsucc)
         for n in blocks:
             if n not in can:
@@ -468,8 +418,8 @@ class Structurer:
         self.emitted = set()
         self.fallbacks = 0
         self.stub_follows = set()
-        self.gotos = []         # ("exit", loop header, target) | ("shared", target)
-        self.loop_exit = {}     # loop header -> the exit its `break`s go to
+        self.gotos = []         
+        self.loop_exit = {}     
 
     def ipdom_of(self, n):
         p = self.ipdom.get(n)
@@ -496,24 +446,22 @@ class Structurer:
                     out.append(SBreak())
                     return out
                 if cur not in body:
-                    # leaving the loop to somewhere other than its exit
+
                     tail = self.terminal_tail(cur, loop)
                     if tail is not None:
                         out += tail
                         return out
                     if self.same_as_exit(cur, ex):
-                        # the same statements the loop exit runs, then the same place
+
                         out.append(SBreak())
                         return out
                     if self.breaking_region(cur, h, body, ex):
-                        # a few statements/branches of its own, then the loop exit:
-                        # `if c then x = a or b break end`
+
                         out += self.region(cur, ex, None)
                         out.append(SBreak())
                         return out
                     if self.returning_region(cur, body):
-                        # code only this loop leads to, and it always returns:
-                        # it can sit right here
+
                         out += self.region(cur, None, None)
                         return out
                     out.append(SGotoState(cur))
@@ -525,7 +473,7 @@ class Structurer:
                     self.fallbacks += 1
                     return out
             if cur in self.emitted and cur not in self.loops:
-                # already emitted elsewhere: code sharing we could not structure
+
                 tail = self.terminal_tail(cur, loop)
                 if tail is not None:
                     out += tail
@@ -539,11 +487,11 @@ class Structurer:
                 cur = self.emit_loop(cur, out, loop)
                 lp = out[-1]
                 if lp.kind == "while" and not breaks(lp.body):
-                    # never left normally: nothing after it runs
+
                     return out
                 continue
             if self.blocks[cur].kind in ("for", "forin"):
-                # a for header that is not a loop (body never loops back): run it once
+
                 out.append(SError("for loop without back edge"))
                 return out
             self.emitted.add(cur)
@@ -563,32 +511,26 @@ class Structurer:
             if b.kind == "goto":
                 cur = b.succ[0]
                 continue
-            # conditional
+
             t, e = b.succ
             m = self.ipdom_of(cur)
             if loop is not None and m is not None and m not in loop[1] and (m != loop[2] or m in self.stub_follows):
-                # (a follow behind exit stubs is where every break ends up,
-                # not a join: `if c then stub; break end` keeps the rest here)
+
                 m = None
             if loop is not None and m == loop[0]:
                 if (t == loop[0] or e == loop[0]) and stop is not None and stop != loop[0] and stop in loop[1]:
-                    # `if c then continue end` inside a region that ends at a join
-                    # in the loop body: the rest stays at this level, so it still
-                    # stops there (the join is not emitted twice)
+
                     c = b.cond if t == loop[0] else negate(b.cond)
                     out.append(SIf(c, SBlock([SContinue()]), SBlock()))
                     cur = e if t == loop[0] else t
                     continue
-                # one side continues: the other paths may still meet in the body
+
                 m = self.common_join(t, e, loop) or m
             if m is None:
-                # paths that return early keep the join from post-dominating:
-                # join at the first block both sides can reach
+
                 m = self.common_join(t, e, loop)
             if m is None:
-                # no join point: if one side always leaves (return / break /
-                # continue / error), keep the other side at this level
-                # (the sides still end at this region's stop: an outer join)
+
                 then = self.region(t, stop, loop)
                 if terminal(then):
                     out.append(SIf(b.cond, then, SBlock()))
@@ -609,7 +551,7 @@ class Structurer:
 
     def emit_loop(self, h, out, outer):
         body = self.loop_body[h]
-        # exits: successors of body blocks outside the body
+
         exits = []
         for n in body:
             for s in self.blocks[n].succ:
@@ -619,7 +561,7 @@ class Structurer:
         if len(exits) == 1:
             ex = exits[0]
         elif exits:
-            # prefer the exit that post-dominates the header
+
             p = self.ipdom_of(h)
             while p is not None and p in body:
                 p = self.ipdom_of(p)
@@ -715,8 +657,7 @@ class Structurer:
         if not both:
             return None
         m = min(both, key=lambda x: self.rpo_index.get(x, 1 << 30))
-        # a join the branch targets themselves would be (then/else side empty) is fine;
-        # a join inside a nested loop is not (the loop header is where it is entered)
+
         for h, body in self.loop_body.items():
             if m in body and h != m and (loop is None or h != loop[0]) and (t not in body or e not in body):
                 return None
@@ -751,7 +692,7 @@ class Structurer:
             if len(seen) > limit or x in self.emitted or x in body or b.kind not in ("goto", "cond"):
                 return False
             if any(x in lb and h not in lb for lb in self.loop_body.values()):
-                # inside some other loop than the ones around this one
+
                 return False
             st += b.succ
         return all(p in seen or p in body for x in seen for p in self.blocks[x].preds)
@@ -773,7 +714,7 @@ class Structurer:
         for x in seen:
             if any(p not in seen and p not in body for p in self.blocks[x].preds):
                 return False
-        # loops inside the region are fine, loops around it are not
+
         for h, lb in self.loop_body.items():
             if (h in seen) != bool(lb & seen) or (h in seen and not lb <= seen):
                 return False
@@ -822,7 +763,7 @@ class Structurer:
                 return None
             seen.add(cur)
             b = self.blocks[cur]
-            # copies: declare() marks statements (is_local) per position
+
             out += [copy.deepcopy(s) for s in b.stmts]
             if len(out) > limit:
                 return None
@@ -842,13 +783,7 @@ class Structurer:
     def region_after(self, cur, loop):
         return self.region(cur, None, loop)
 
-
-# --------------------------------------------------------------------------
-# goto elimination: what the structurer cannot express is rewritten in the
-# CFG (semantics-preserving) and the function is structured again
-
-SPLIT_LIMIT = 3000      # statements node splitting may copy per function
-
+SPLIT_LIMIT = 3000      
 
 def structure(entry, blocks, own=None, rounds=60):
     """Structurer.run, with its goto fallbacks resolved by CFG rewrites:
@@ -861,7 +796,7 @@ def structure(entry, blocks, own=None, rounds=60):
     irreducible loops are split first (make_reducible). Repeats until no goto
     is left; if the copy budget runs out, the function becomes a state
     machine. `own` gets the new variables. -> (entry, body, last Structurer)."""
-    # the graph before any rewrite, for the last resort
+
     first = {}
     for bid, b in blocks.items():
         c = first[bid] = copy.copy(b)
@@ -888,8 +823,7 @@ def structure(entry, blocks, own=None, rounds=60):
             if g[0] == "shared" and g[1] in blocks and copied < SPLIT_LIMIT:
                 k = split_node(blocks, g[1], sr)
                 if not k:
-                    # one way in: a loop around it is entered twice (emitted
-                    # from two branches that never join before it)
+
                     hs = [h for h, body in sr.loop_body.items() if g[1] in body]
                     hs.sort(key=lambda h: len(sr.loop_body[h]))
                     for h in hs:
@@ -907,7 +841,6 @@ def structure(entry, blocks, own=None, rounds=60):
         body = state_machine(*first, "state")
         sr.fallbacks = 0
     return entry, body, sr
-
 
 def state_machine(entry, blocks, name):
     """Last resort, always correct: the whole function as a dispatch loop
@@ -941,7 +874,6 @@ def state_machine(entry, blocks, name):
         test = Bin("CompareEq", CG.LocalName(name), Const(k))
         chain = SBlock([SIf(test, out, chain)])
     return SBlock([_set_stmt(name, 1), SLoop(chain)])
-
 
 def sccs(nodes, succ):
     """Strongly connected components of the subgraph on `nodes` (iterative Tarjan)."""
@@ -982,7 +914,6 @@ def sccs(nodes, succ):
                     out.append(comp)
     return out
 
-
 def make_reducible(entry, blocks):
     """Irreducible loops (a cycle entered at more than one block: the
     structurer finds no natural loop there) become reducible by node
@@ -1002,9 +933,8 @@ def make_reducible(entry, blocks):
             break
     return copied
 
-
 def _split_irreducible(entry, blocks, nodes, rank):
-    succ = lambda n: blocks[n].succ  # noqa: E731
+    succ = lambda n: blocks[n].succ  
     for comp in sccs(sorted(nodes, key=lambda n: rank.get(n, 1 << 30)), succ):
         if len(comp) == 1:
             continue
@@ -1015,7 +945,7 @@ def _split_irreducible(entry, blocks, nodes, rank):
         h = entries[0]
         if len(entries) > 1:
             e = entries[1]
-            # blocks e reaches inside the component without passing h
+
             region = []
             st = [e]
             while st:
@@ -1033,7 +963,6 @@ def _split_irreducible(entry, blocks, nodes, rank):
         if _split_irreducible(entry, blocks, comp - {h}, rank):
             return True
     return False
-
 
 def copy_region(blocks, region):
     """New blocks copying `region`; edges inside it go to the copies, edges
@@ -1054,15 +983,12 @@ def copy_region(blocks, region):
         c.succ = [m.get(s, s) for s in o.succ]
     return m
 
-
 def _new_id(blocks):
     return max(blocks) + 1
-
 
 def _set_stmt(name, v):
     import codegen as CG
     return CG.AssignS([CG.LocalName(name)], S.Multi([Const(v)]))
-
 
 def unify_exits(entry, blocks, sr, h, name):
     """Loop `h` gets a single exit: each other exit x_k is entered through a
@@ -1081,7 +1007,7 @@ def unify_exits(entry, blocks, sr, h, name):
     others = [x for x in exits if x != main]
     if main is None:
         main, others = others[-1], others[:-1]
-    # dispatch chain: D_1 .. D_n, the last one falls through to the main exit
+
     disp = []
     for k, x in enumerate(others, 1):
         d = Block(_new_id(blocks))
@@ -1103,8 +1029,7 @@ def unify_exits(entry, blocks, sr, h, name):
     for n in body:
         b = blocks[n]
         b.succ = [stub.get(s, s) if s not in body else s for s in b.succ]
-    # reset on entry to the loop: a block of its own in front of the header
-    # (a `for` header predecessor would drop statements put into it)
+
     pre = Block(_new_id(blocks))
     blocks[pre.id] = pre
     pre.stmts = [_set_stmt(name, None)]
@@ -1116,7 +1041,6 @@ def unify_exits(entry, blocks, sr, h, name):
         entry = pre.id
     recompute_preds(blocks)
     return entry
-
 
 def split_node(blocks, x, sr, preds=None):
     """Node splitting: one copy of the region x heads per predecessor but the
@@ -1142,8 +1066,7 @@ def split_node(blocks, x, sr, preds=None):
             out.append(n)
             st += blocks[n].succ
         return out, sum(len(blocks[n].stmts) + 1 for n in out)
-    # up to where the paths that share x meet again (the join of the branch
-    # that forks them), else up to x's own join, else x alone
+
     fork = sr.idom.get(x)
     for stop in ([sr.ipdom_of(fork)] if fork is not None and fork != x else []) + [sr.ipdom_of(x)]:
         region, size = region_to(stop)
@@ -1160,7 +1083,6 @@ def split_node(blocks, x, sr, preds=None):
     recompute_preds(blocks)
     return n
 
-
 def reachable_rev(start, succ):
     seen = set()
     st = [start]
@@ -1172,10 +1094,6 @@ def reachable_rev(start, succ):
         st += succ.get(x, [])
     return seen
 
-
-# --------------------------------------------------------------------------
-# cleanup of the structured AST
-
 def negate(c):
     from luasym import Un, Bin
     if isinstance(c, Un) and c.op == "Not":
@@ -1185,19 +1103,18 @@ def negate(c):
         return Bin(flip[c.op], c.a, c.b)
     return Un("Not", c)
 
-
 def cleanup(stmts, in_loop_tail=False):
     """Trailing `continue` in loops, empty then-branches, nested cleanups."""
     out = SBlock()
     for i, st in enumerate(stmts):
-        # nothing after a statement that always leaves can run
+
         dead_after = isinstance(st, SIf) and terminal(st.then) and terminal(st.els)
         last = i == len(stmts) - 1 or dead_after
         if isinstance(st, SIf):
             st.then = cleanup(st.then, in_loop_tail and last)
             st.els = cleanup(st.els, in_loop_tail and last)
             if in_loop_tail and last:
-                # else: if c then continue end; R  ->  elseif not c then R
+
                 st.els = _tail_guard_to_if(st.els)
             if not st.then and st.els:
                 st.cond, st.then, st.els = negate(st.cond), st.els, SBlock()
@@ -1213,7 +1130,6 @@ def cleanup(stmts, in_loop_tail=False):
             break
     return out
 
-
 def _tail_guard_to_if(stmts):
     """At a loop body's tail, `if c then continue end; R` == `if not c then R end`."""
     if (len(stmts) >= 2 and isinstance(stmts[0], SIf) and not stmts[0].els
@@ -1221,11 +1137,9 @@ def _tail_guard_to_if(stmts):
         return SBlock([SIf(negate(stmts[0].cond), SBlock(stmts[1:]), SBlock())])
     return stmts
 
-
 def _has_call(e):
     import codegen as CG
     return any(isinstance(x, CG.CallE) for x in CG.walk(e))
-
 
 def breaks(stmts):
     """Does this loop body contain a `break` of its own loop?"""
@@ -1235,7 +1149,6 @@ def breaks(stmts):
         if isinstance(st, SIf) and (breaks(st.then) or breaks(st.els)):
             return True
     return False
-
 
 def terminal(stmts):
     """Does this statement list always leave (return, break, continue, error)?"""

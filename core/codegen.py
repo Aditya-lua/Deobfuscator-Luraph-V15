@@ -1,19 +1,9 @@
-"""
-Expression cleanup and Luau rendering for the devirtualizer.
-
-  simplify_blocks(blocks)  per basic block: calls materialized into temps are
-                           folded back into their single use; registers that
-                           are defined and used once (and dead afterwards) are
-                           inlined when nothing with side effects sits between
-                           definition and use. Liveness is computed on the CFG.
-  Renderer                 structured AST -> Luau text.
-"""
 import math
 import re
 import unicodedata
 
 import luasym as S
-from luasym import (Const, Reg, Pseudo, Global, Upval, Index, Bin, Un, IfExp, TempVal, Vararg, ClosureExpr,  # noqa: F401
+from luasym import (Const, Reg, Pseudo, Global, Upval, Index, Bin, Un, IfExp, TempVal, Vararg, ClosureExpr,  
                     Multi, TempTail, VarargTail, SymList, TailCount, NewTable, Expr)
 import structure as ST
 
@@ -28,12 +18,7 @@ RIGHT_ASSOC = {"Concat", "Pow"}
 COMPOUND = {"Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Concat"}
 FLIPPED = {"CompareLt": "CompareGt", "CompareLe": "CompareGe"}
 
-
-# --------------------------------------------------------------------------
-# generic expression helpers
-
-_LEAF_TYPES = set()     # types children() found no sub-expressions in (leaves: Reg, Const, ...)
-
+_LEAF_TYPES = set()     
 
 def children(e):
     """Sub-expressions of an IR expression (for walking)."""
@@ -65,7 +50,7 @@ def children(e):
     if isinstance(e, GenIterE):
         return list(e.args)
     if isinstance(e, ClosureExpr):
-        # captured registers are uses (by reference or by value)
+
         out = []
         for u in e.upvals:
             if type(u).__name__ == "MaybeBox":
@@ -77,7 +62,6 @@ def children(e):
         return out
     _LEAF_TYPES.add(type(e))
     return []
-
 
 def map_expr(e, fn):
     """Rebuild an expression bottom-up; fn(node) may return a replacement."""
@@ -103,10 +87,8 @@ def map_expr(e, fn):
         return TailRef(InlineTail(map_expr(e.tail.call, fn)))
     return e
 
-
 def map_multi(m, fn):
     return Multi([map_expr(x, fn) for x in m.items], map_tail(m.tail, fn))
-
 
 def map_tail(t, fn):
     if t is None:
@@ -118,13 +100,11 @@ def map_tail(t, fn):
         return InlineTail(map_expr(t.call, fn))
     return t
 
-
 class TailRef(Expr):
     """Wrapper so tails can be visited/replaced like expressions."""
 
     def __init__(self, tail):
         self.tail = tail
-
 
 class InlineTail:
     """A multret tail that is a call expression inlined in place (f(a, g()))."""
@@ -132,23 +112,19 @@ class InlineTail:
     def __init__(self, call):
         self.call = call
 
-
 class CallE(Expr):
     pure = False
 
     def __init__(self, fn, args, method=None):
         self.fn, self.args, self.method = fn, args, method
 
-
 class NewTableE(Expr):
     def __init__(self, items, tail=None):
         self.items, self.tail = items, tail
 
-
 class GenIterE(Expr):
     def __init__(self, args):
         self.args = args
-
 
 class FuncE(Expr):
     """A lifted child function: rendered text (list of lines, already indented relative)."""
@@ -156,11 +132,9 @@ class FuncE(Expr):
     def __init__(self, lines):
         self.lines = lines
 
-
 class LocalName(Expr):
     def __init__(self, name):
         self.name = name
-
 
 def walk(e):
     st = [e]
@@ -171,10 +145,8 @@ def walk(e):
         yield x
         st += children(x)
 
-
 def regs_read(e):
     return [x.n for x in walk(e) if isinstance(x, Reg)]
-
 
 def temps_read(e):
     out = []
@@ -185,10 +157,8 @@ def temps_read(e):
             out.append(x.tail.t)
     return out
 
-
 def has_side_effects(e):
     return any(isinstance(x, CallE) for x in walk(e))
-
 
 def expr_key(e):
     """Structural identity (for comparing expressions)."""
@@ -208,31 +178,23 @@ def expr_key(e):
         return "I(%s,%s)" % (expr_key(e.obj), expr_key(e.key))
     return "X%d" % id(e)
 
-
-# --------------------------------------------------------------------------
-# statements used after simplification (besides devirt.Assign etc.)
-
 class AssignS:
     """targets = values (targets: list of lvalue exprs; values: Multi)."""
 
     def __init__(self, targets, values):
         self.targets, self.values = targets, values
 
-
 class CallS:
     def __init__(self, call):
         self.call = call
-
 
 class SetListS:
     def __init__(self, tbl, start, values):
         self.tbl, self.start, self.values = tbl, start, values
 
-
 class LocalS:
     def __init__(self, names, values):
         self.names, self.values = names, values
-
 
 class CloseS:
     """End of a captured local's scope (Luraph's close-upvalue op)."""
@@ -240,11 +202,9 @@ class CloseS:
     def __init__(self, reg):
         self.reg = reg
 
-
 class CommentS:
     def __init__(self, text):
         self.text = text
-
 
 def convert_stmts(stmts, D):
     """devirt IR statements -> AssignS/CallS with CallE expressions."""
@@ -262,13 +222,12 @@ def convert_stmts(stmts, D):
         elif isinstance(st, D.Assign):
             v = st.value
             if isinstance(v, SymList) and not isinstance(st.target, Reg):
-                # `t[k] = {f()}` (LPH_JIT code): a real table constructor
+
                 v = NewTableE([(None, conv(x, D)) for x in v.items], conv_tail(v.tail))
                 out.append(AssignS([conv(st.target, D)], Multi([v])))
                 continue
             if isinstance(v, SymList):
-                # a packed multret list kept in a register: the consumer
-                # already refers to its contents; keep a readable fallback
+
                 v = CallE(Global("table.pack"), Multi([conv(x, D) for x in v.items], conv_tail(v.tail)))
                 a = AssignS([conv(st.target, D)], Multi([v]))
                 a.pack = True
@@ -279,7 +238,6 @@ def convert_stmts(stmts, D):
             out.append(CommentS("unknown statement %r" % (st,)))
     return out
 
-
 class ForPrepS:
     """Evaluates a for header's expressions (a loops.LoopExprs list shared with
     the header, which renders them). Renders nothing itself."""
@@ -287,19 +245,17 @@ class ForPrepS:
     def __init__(self, exprs):
         self.exprs = exprs
 
-
 class TempDef:
     """t := call (all results)."""
 
     def __init__(self, t, call):
         self.t, self.call = t, call
 
-
 def conv(e, D):
     if isinstance(e, D.GenIter):
         return GenIterE([conv(x, D) for x in e.args.items] if e.args is not None else [])
     if isinstance(e, S.NewTable):
-        # (items: an LPH_JIT table constructor, devirt special_set)
+
         return NewTableE([(conv(k, D) if k is not None else None, conv(v, D)) for k, v in e.items])
     if isinstance(e, Index):
         return Index(conv(e.obj, D), conv(e.key, D))
@@ -311,17 +267,11 @@ def conv(e, D):
         return Const(None)
     return e
 
-
 def conv_multi(m, D):
     return Multi([conv(x, D) if not isinstance(x, SymList) else x for x in m.items], conv_tail(m.tail))
 
-
 def conv_tail(t):
     return t
-
-
-# --------------------------------------------------------------------------
-# liveness + folding
 
 def stmt_uses(st):
     """(regs read, temps read) by a statement (lvalue sub-expressions count as reads)."""
@@ -331,11 +281,9 @@ def stmt_uses(st):
         temps += temps_read(e)
     return regs, temps
 
-
 def stmt_regs(st):
     """The registers a statement reads (stmt_uses without the temps)."""
     return {x.n for e in _stmt_exprs(st) for x in walk(e) if isinstance(x, Reg)}
-
 
 def _stmt_exprs(st):
     exprs = []
@@ -359,16 +307,14 @@ def _stmt_exprs(st):
         exprs += list(st.exprs)
     return exprs
 
-
 def stmt_defs(st):
     if isinstance(st, AssignS):
         return [t.n for t in st.targets if isinstance(t, Reg)]
     return []
 
-
 def term_uses(b):
     exprs = []
-    # (for headers: their expressions are uses of the ForPrepS before the loop)
+
     if b.kind == "cond":
         exprs.append(b.cond)
     elif b.kind == "ret" and b.values is not None:
@@ -380,7 +326,6 @@ def term_uses(b):
         regs += regs_read(e)
         temps += temps_read(e)
     return regs, temps
-
 
 def liveness(blocks):
     """live-out register sets per block."""
@@ -414,7 +359,6 @@ def liveness(blocks):
                 changed = True
     return live_out
 
-
 def movable(e):
     """Can this expression be evaluated later than written (no reads of mutable state)?"""
     for x in walk(e):
@@ -422,10 +366,9 @@ def movable(e):
             return False
     return True
 
-
 def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
     st = b.stmts
-    # --- temps: fold `t := call` into its uses
+
     out = []
     i = 0
     while i < len(st):
@@ -436,7 +379,7 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
                 out.append(CallS(s.call))
                 i += 1
                 continue
-            # consecutive `rX = T[1]; rY = T[2] ...` (all uses of t)
+
             j = i + 1
             targets = []
             while j < len(st) and isinstance(st[j], AssignS) and len(st[j].targets) == 1 and \
@@ -446,12 +389,12 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
                 targets.append(st[j].targets[0])
                 j += 1
             if targets and len(targets) == n_uses:
-                # one target takes the first value: a plain expression (inlinable)
+
                 out.append(AssignS(targets, Multi([s.call]) if len(targets) == 1
                                    else Multi([], InlineTail(s.call))))
                 i = j
                 continue
-            # single use as a tail / single value in a later statement of this block
+
             if n_uses == 1:
                 k = i + 1
                 blocked = False
@@ -461,7 +404,7 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
                     if s.t in ts:
                         break
                     if inputs & set(stmt_defs(st[k])):
-                        # the call would read a register after it was overwritten
+
                         blocked = True
                     elif isinstance(st[k], (CloseS, CommentS)) or fresh_table_store(st, k):
                         pass
@@ -489,8 +432,7 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
         out.append(s)
         i += 1
     b.stmts = out
-    # --- registers: inline single-use definitions (one forward sweep per
-    # round; per-statement uses/defs memoized: this is the lifter's hot loop)
+
     memo = {}
 
     def ud(x):
@@ -505,7 +447,7 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
     while changed:
         changed = False
         st = b.stmts
-        opened = set(open_in)       # open registers before st[i]
+        opened = set(open_in)       
         i = 0
         while i < len(st):
             s = st[i]
@@ -514,7 +456,6 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
                 continue
             open_step(s, b, opened)
             i += 1
-
 
 def inline_def(b, st, i, live_out, opened, ud):
     """Inline `r = val` (st[i]) into its single use if that is safe; True if done."""
@@ -527,19 +468,17 @@ def inline_def(b, st, i, live_out, opened, ud):
     if isinstance(val, FuncE) or r in opened:
         return False
     if isinstance(val, ClosureExpr):
-        # a closure moves into its use only from right before it (by-value
-        # captures read registers at creation), and never when it
-        # captures its own variable (recursive local function)
+
         if r in regs_read(val):
             return False
         nxt = st[i + 1] if i + 1 < len(st) else None
         if nxt is not None and r not in ud(nxt)[0]:
             return False
-        # never as the callee: `(function(...) <body> end)(args)` hides a named helper
+
         if nxt is not None and any(isinstance(x, CallE) and isinstance(x.fn, Reg) and x.fn.n == r
                                    for x in stmt_eval_order(nxt, None)):
             return False
-    # find the next use / redefinition
+
     uses = 0
     use_at = None
     redefined = False
@@ -551,7 +490,7 @@ def inline_def(b, st, i, live_out, opened, ud):
             if use_at is None:
                 use_at = k
             elif k != use_at:
-                return False        # used in two statements
+                return False        
             if uses > 2:
                 return False
         if r in dk:
@@ -566,15 +505,15 @@ def inline_def(b, st, i, live_out, opened, ud):
             else:
                 return False
     if uses == 2 and use_at != "term" and method_self(st[use_at], r):
-        uses = 1     # obj:m(...) reads its object once (NAMECALL), even a call result
+        uses = 1     
     if uses != 1 or use_at is None:
         return False
-    # a closure capturing r needs the variable itself (no expression to inline into)
+
     if captures_reg(st[use_at] if use_at != "term" else None, b, r):
         return False
     if not redefined and r in live_out:
         return False
-    # anything between definition and use that could change what `val` reads?
+
     stop = len(st) if use_at == "term" else use_at
     deps = set(regs_read(val))
     mov = movable(val)
@@ -586,9 +525,8 @@ def inline_def(b, st, i, live_out, opened, ud):
     if use_at != "term" and not prefix_ok(val) and r in target_regs(st[use_at]):
         return False
     if expands(val) and truncated_use(st[use_at] if use_at != "term" else None, b, r):
-        return False        # f((g())) reads worse than a named local
-    # inside the using statement, nothing with side effects may run before
-    # the register is read (the value would move after it)
+        return False        
+
     if not mov and call_before(st[use_at] if use_at != "term" else None, b, r):
         return False
     if use_at == "term":
@@ -600,10 +538,9 @@ def inline_def(b, st, i, live_out, opened, ud):
         old = st[use_at]
         st[use_at] = subst_reg(old, r, val)
         if st[use_at] is old:
-            ud.memo.pop(id(old), None)      # updated in place (ForPrepS): stale memo
+            ud.memo.pop(id(old), None)      
     del st[i]
     return True
-
 
 def truncated_use(st, b, hit):
     """Is the value `hit` (a register number, or a predicate on expressions)
@@ -612,7 +549,7 @@ def truncated_use(st, b, hit):
     (`f((g()))`)? Returns are left out: `return (s:gsub(...))` is idiomatic."""
     if not callable(hit):
         r = hit
-        hit = lambda x: isinstance(x, Reg) and x.n == r     # noqa: E731
+        hit = lambda x: isinstance(x, Reg) and x.n == r     
 
     def last_hit(m):
         return m is not None and m.tail is None and bool(m.items) and hit(m.items[-1])
@@ -623,7 +560,6 @@ def truncated_use(st, b, hit):
                 and hit(e.items[-1][1]):
             return True
     return isinstance(st, SetListS) and last_hit(st.values)
-
 
 def eval_order(e, out):
     """Post-order list of sub-expressions in Luau evaluation order."""
@@ -661,7 +597,6 @@ def eval_order(e, out):
             eval_order(x, out)
     out.append(e)
 
-
 def stmt_eval_order(st, b):
     out = []
     if st is None:
@@ -694,7 +629,6 @@ def stmt_eval_order(st, b):
             eval_order(x, out)
     return out
 
-
 def call_before(st, b, r):
     """Does a call finish (or a closure get created) before register r is read
     (r: a register number, or a predicate on expressions)?"""
@@ -706,19 +640,16 @@ def call_before(st, b, r):
             return True
     return False
 
-
 def is_temp(t):
     def hit(x):
         return (isinstance(x, TempVal) and x.t == t) or             (isinstance(x, TailRef) and isinstance(x.tail, TempTail) and x.tail.t == t)
     return hit
-
 
 def stable_path(e):
     """Expressions that give the same value when read twice in a row."""
     if isinstance(e, (Reg, Const, Global, Upval, LocalName)):
         return True
     return isinstance(e, Index) and isinstance(e.key, Const) and stable_path(e.obj)
-
 
 def method_self(st, r):
     """Does the statement contain a method call r:name(...) (r as object and first argument)?"""
@@ -727,7 +658,6 @@ def method_self(st, r):
         if isinstance(x, CallE) and isinstance(x.fn, Index) and isinstance(x.fn.obj, Reg) and x.fn.obj.n == r                 and x.args.items and isinstance(x.args.items[0], Reg) and x.args.items[0].n == r                 and isinstance(x.fn.key, Const) and isinstance(x.fn.key.v, bytes):
             return True
     return False
-
 
 def ref_captures(exprs):
     out = set()
@@ -738,10 +668,9 @@ def ref_captures(exprs):
                     out.add(u.reg)
                 elif isinstance(u, S.LTable) and any(type(v).__name__ == "RegFile" for v in u.h.values()):
                     out |= {v for v in u.h.values() if isinstance(v, int)}
-            # registers the closure reads through a captured frame
+
             out |= set(getattr(x, "frame_regs", ()))
     return out
-
 
 def open_step(st, b, cur):
     """Open (captured by reference, not closed yet) registers after a statement."""
@@ -749,7 +678,6 @@ def open_step(st, b, cur):
         cur.discard(st.reg)
     else:
         cur |= ref_captures(stmt_eval_order(st, b))
-
 
 def open_registers(blocks):
     """Registers open at each block entry. While a register is open, closures
@@ -777,22 +705,19 @@ def open_registers(blocks):
                 changed = True
     return inn
 
-
 def open_before(b, i, open_in):
     cur = set(open_in)
     for st in b.stmts[:i]:
         open_step(st, b, cur)
     return cur
 
-
 def copy_propagate(b, live_out, open_in=frozenset()):
     """`rX = rY` / `rX = constant` (Luraph moves values through scratch
     registers): use the source directly while neither is reassigned."""
     st = b.stmts
     i = 0
-    opened = set(open_in)       # open registers before st[i]
-    # registers each statement reads (the scans below are quadratic; changed
-    # statements are replaced by new objects, never mutated here)
+    opened = set(open_in)       
+
     memo = {}
 
     def reads(x):
@@ -834,7 +759,7 @@ def copy_propagate(b, live_out, open_in=frozenset()):
                 end = k
                 break
             if src is not None and src in d:
-                # later uses would see the new source value
+
                 for k2 in range(k + 1, len(st)):
                     if r in reads(st[k2]):
                         ok = False
@@ -858,8 +783,7 @@ def copy_propagate(b, live_out, open_in=frozenset()):
                 else:
                     uses.append("term")
         if ok and uses and isinstance(val, Upval):
-            # an upvalue can change under any call: only when nothing between
-            # here and the last use runs code
+
             last = max(k for k in uses if k != "term") if any(k != "term" for k in uses) else len(st) - 1
             if "term" in uses:
                 last = len(st) - 1
@@ -879,7 +803,6 @@ def copy_propagate(b, live_out, open_in=frozenset()):
                 st[k] = subst_reg(st[k], r, val)
         del st[i]
 
-
 def fresh_table_store(st, k):
     """st[k] is `t[const] = <pure>` into a table built in this block that
     nothing else has seen yet (a table constructor in progress): no call can
@@ -896,14 +819,13 @@ def fresh_table_store(st, k):
             return (isinstance(p, AssignS) and len(p.targets) == 1 and len(p.values.items) == 1
                     and isinstance(p.values.items[0], NewTableE))
         if r in stmt_regs(p):
-            # only other stores into it
+
             if not (isinstance(p, AssignS) and len(p.targets) == 1 and isinstance(p.targets[0], Index)
                     and isinstance(p.targets[0].obj, Reg) and p.targets[0].obj.n == r
                     and r not in regs_read(p.targets[0].key)
                     and all(r not in regs_read(v) for v in p.values.items)):
                 return False
     return False
-
 
 def fold_iterator_call(b, live_out):
     """`f, s, c = pairs(t)` before a generic for's ForPrepS(f, s, c): the call
@@ -934,7 +856,6 @@ def fold_iterator_call(b, live_out):
                 continue
         i += 1
 
-
 def drop_dead_packs(b, live_out):
     """Luraph keeps every multi-value result list in a register (table.pack);
     consumers read the values directly, so most of these are never read.
@@ -945,12 +866,11 @@ def drop_dead_packs(b, live_out):
         if getattr(st, "pack", False) and isinstance(st.targets[0], Reg) and st.targets[0].n not in live:
             continue
         if isinstance(st, AssignS) and len(st.targets) == 1 and isinstance(st.targets[0], Reg)                 and len(st.values.items) == 1 and getattr(st.values.items[0], "frame_evaluated", False)                 and st.targets[0].n not in live:
-            continue    # a string decryptor whose calls were all evaluated (devirt.frame_call)
+            continue    
         live -= set(stmt_defs(st))
         live |= stmt_regs(st)
         keep.append(st)
     b.stmts = keep[::-1]
-
 
 def captures_reg(st, b, r):
     """Does the statement (or, st None, the block terminator) capture register r in a closure?"""
@@ -974,11 +894,9 @@ def captures_reg(st, b, r):
                 return True
     return False
 
-
 def prefix_ok(e):
     """Can stand before `.x` / `[k]` / `(...)` in a statement without parentheses?"""
     return isinstance(e, (Reg, Global, Upval, Index, CallE, LocalName))
-
 
 def target_regs(st):
     if isinstance(st, AssignS):
@@ -993,7 +911,6 @@ def target_regs(st):
         return regs_read(st.call.fn) if isinstance(st.call, CallE) else []
     return []
 
-
 def pure_stmt(st):
     """Statement that cannot change globals/tables/upvalues (register moves only)."""
     if isinstance(st, (CloseS, CommentS)):
@@ -1002,18 +919,14 @@ def pure_stmt(st):
         not any(has_side_effects(v) for v in st.values.items) and \
         not (st.values.tail is not None and isinstance(st.values.tail, InlineTail))
 
-
 def replace_reg(e, r, val):
     return S_map(e, lambda x: val if isinstance(x, Reg) and x.n == r else None)
-
 
 def S_map(e, fn):
     return map_expr(e, fn)
 
-
 def replace_reg_multi(m, r, val):
     return map_multi(m, lambda x: val if isinstance(x, Reg) and x.n == r else None)
-
 
 def replace_temp(e, t, call):
     def fn(x):
@@ -1026,10 +939,8 @@ def replace_temp(e, t, call):
         return None
     return map_expr(e, fn)
 
-
 def expand_tail_items(items, t, call):
     return [replace_temp(x, t, call) for x in items]
-
 
 def replace_temp_multi(m, t, call):
     items = [replace_temp(x, t, call) for x in m.items]
@@ -1039,14 +950,11 @@ def replace_temp_multi(m, t, call):
         tail = r.tail if isinstance(r, TailRef) else tail
     return Multi(items, tail)
 
-
 def subst_temp(st, t, call):
     return map_stmt(st, lambda e: replace_temp(e, t, call), lambda m: replace_temp_multi(m, t, call))
 
-
 def subst_reg(st, r, val):
     return map_stmt(st, lambda e: replace_reg(e, r, val), lambda m: replace_reg_multi(m, r, val))
-
 
 def map_stmt(st, fe, fm):
     if isinstance(st, AssignS):
@@ -1059,11 +967,10 @@ def map_stmt(st, fe, fm):
     if isinstance(st, SetListS):
         return SetListS(fe(st.tbl), st.start, fm(st.values))
     if isinstance(st, ForPrepS):
-        # the list is shared with the loop header: update in place
+
         st.exprs[:] = [fe(x) for x in st.exprs]
         return st
     return st
-
 
 def count_temp_uses(blocks):
     cnt = {}
@@ -1077,13 +984,10 @@ def count_temp_uses(blocks):
             cnt[t] = cnt.get(t, 0) + 1
     return cnt
 
-
 FOLD_ARITH = ("Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow")
-
 
 def _num(e):
     return isinstance(e, Const) and isinstance(e.v, (int, float)) and not isinstance(e.v, bool)
-
 
 def _fold_node(x):
     """One constant folding step (children already folded), or None."""
@@ -1110,10 +1014,8 @@ def _fold_node(x):
         return items[x.key.v - 1] if 1 <= x.key.v <= len(items) else Const(None)
     return None
 
-
 def _has_foldable(e):
     return any(_fold_node(x) is not None for x in walk(e))
-
 
 def fold_constants(e):
     """Arithmetic and bit32 calls on constants, bottom-up (Luraph's number
@@ -1128,7 +1030,6 @@ def fold_constants(e):
     e = map_expr(e, fn)
     r = _fold_node(e)
     return r if r is not None else e
-
 
 def fold_constants_block(b):
     """Fold constants in a block. True if anything changed."""
@@ -1146,7 +1047,6 @@ def fold_constants_block(b):
         b.values, changed = Multi([fold_constants(x) for x in b.values.items], b.values.tail), True
     return changed
 
-
 def fold_const_temps(blocks):
     """t := <constant call> whose uses are all single values: the constant."""
     consts = {}
@@ -1158,7 +1058,7 @@ def fold_const_temps(blocks):
                     consts[st.t] = r
     if not consts:
         return False
-    # temps used through a multret tail keep their call
+
     for b in blocks.values():
         for st in b.stmts:
             for e in stmt_exprs(st):
@@ -1191,7 +1091,6 @@ def fold_const_temps(blocks):
             b.values = map_multi(b.values, fn)
     return True
 
-
 def stmt_exprs(st):
     if isinstance(st, AssignS):
         return list(st.targets) + list(st.values.items)
@@ -1203,7 +1102,6 @@ def stmt_exprs(st):
         return list(st.exprs)
     return []
 
-
 def term_exprs(b):
     out = []
     if b.cond is not None:
@@ -1212,7 +1110,6 @@ def term_exprs(b):
         out += list(b.values.items)
         out.append(b.values)
     return out
-
 
 def simplify_blocks(blocks, D):
     for b in blocks.values():
@@ -1223,7 +1120,7 @@ def simplify_blocks(blocks, D):
             b.values = conv_multi(b.values, D)
     for i in range(12):
         if i >= 3:
-            # only continue while constant folding opens up more folding
+
             changed = fold_const_temps(blocks)
             for b in blocks.values():
                 changed |= fold_constants_block(b)
@@ -1239,9 +1136,7 @@ def simplify_blocks(blocks, D):
             simplify_block(b, live_out[b.id], tu, opened[b.id])
             fold_iterator_call(b, live_out[b.id])
     drop_redundant_stores(blocks)
-    # table constructors: r = {} followed by r[k] = v / setlist. Nested
-    # tables need several rounds: an inner constructor is built in a temp
-    # register and only inlined into the outer store by simplify_block.
+
     for _ in range(8):
         changed = False
         for b in blocks.values():
@@ -1253,7 +1148,6 @@ def simplify_blocks(blocks, D):
             simplify_block(b, live_out[b.id], count_temp_uses(blocks), opened[b.id])
         if not changed:
             break
-
 
 def drop_redundant_stores(blocks):
     """`r = K` where r already holds the constant K on every path (Luraph
@@ -1270,7 +1164,7 @@ def drop_redundant_stores(blocks):
                 and len(st.values.items) == 1 and st.values.tail is None \
                 and isinstance(st.values.items[0], Const) and not getattr(st, "jump", False):
             v = st.values.items[0].v
-            # type in the key: True == 1 and 0 == -0.0 in Python, not in Luau
+
             return st.targets[0].n, (type(v).__name__, repr(v))
         return None
 
@@ -1293,7 +1187,7 @@ def drop_redundant_stores(blocks):
         for x in b.succ:
             if x in preds:
                 preds[x].append(b.id)
-    out = {}                    # None = not reached yet (top)
+    out = {}                    
     inn = {}
     changed = True
     while changed:
@@ -1329,7 +1223,6 @@ def drop_redundant_stores(blocks):
             keep.append(st)
         b.stmts = keep
 
-
 def fold_tables(b):
     """`t = {}` followed by `t[k] = v` / setlist -> one table constructor.
     Pure register moves may sit in between (Luraph loads the item functions
@@ -1344,16 +1237,16 @@ def fold_tables(b):
             r = s.targets[0].n
             tbl = s.values.items[0]
             j = i + 1
-            last = None             # index of the last store folded in
+            last = None             
             consumed = []
             item_reads = set()
-            pending = []            # intermediate statements (kept, before the constructor)
+            pending = []            
             while j < len(st):
                 n = st[j]
                 if isinstance(n, AssignS) and len(n.targets) == 1 and isinstance(n.targets[0], Index) and                         isinstance(n.targets[0].obj, Reg) and n.targets[0].obj.n == r and                         len(n.values.items) == 1 and n.values.tail is None and                         r not in regs_read(n.values.items[0]) and r not in regs_read(n.targets[0].key):
                     key = n.targets[0].key
                     if isinstance(key, Const) and key.v == count_array(tbl) + 1 and not isinstance(key.v, bool)                             and not any(isinstance(k, Const) and k.v == key.v for k, _ in tbl.items):
-                        key = None      # next array slot: positional item
+                        key = None      
                     tbl.items.append((key, n.values.items[0]))
                     item_reads |= set(regs_read(n.values.items[0])) | set(regs_read(n.targets[0].key))
                     consumed.append(j)
@@ -1377,7 +1270,7 @@ def fold_tables(b):
                     continue
                 break
             if last is not None:
-                # constructor at the last store; intermediates stay before it
+
                 keep = [x for k2, x in enumerate(st[i + 1:last + 1], i + 1) if k2 not in consumed]
                 st[i:last + 1] = keep + [s]
                 i += len(keep)
@@ -1385,25 +1278,18 @@ def fold_tables(b):
         i += 1
     return changed
 
-
 def count_array(tbl):
     return sum(1 for k, v in tbl.items if k is None)
 
-
-# --------------------------------------------------------------------------
-# rendering
-
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
-# a table constructor longer than this (plus its indent) is written one field per line
-TABLE_WIDTH = 100
 
+TABLE_WIDTH = 100
 
 def expands(e):
     """Would this expression give several values in a multi-value position?"""
     if isinstance(e, CallE):
         return True
     return isinstance(e, Vararg)
-
 
 def f32_short(x):
     """The shortest decimal that rounds to the same float32 as x (x a float32 value)."""
@@ -1421,7 +1307,6 @@ def f32_short(x):
         if struct.unpack("<f", struct.pack("<f", y))[0] == f:
             return int(y) if y.is_integer() and abs(y) < 2 ** 53 else y
     return x
-
 
 class Renderer:
     def __init__(self, names=None):
@@ -1450,7 +1335,7 @@ class Renderer:
             if s == "nan":
                 return "(0/0)"
             if abs(v) >= 1e9 and float(v).is_integer():
-                # 1e9, 2.5e10 rather than a row of zeros
+
                 t = "%.3g" % v
                 if "e" in t and float(t) == v:
                     m, x = t.split("e")
@@ -1477,7 +1362,7 @@ class Renderer:
         if isinstance(e, Pseudo):
             return "%s_%d" % (e.name, e.depth)
         if isinstance(e, Global):
-            # Luau has no _ENV: the environment of a Luraph script is getfenv()
+
             return "getfenv()" if e.name == "_ENV" else e.name
         if isinstance(e, Upval):
             return self.names.get(("up", e.idx), "upv%d" % e.idx if isinstance(e.idx, int)
@@ -1490,7 +1375,7 @@ class Renderer:
                     and isinstance(k.v, bytes):
                 name = k.v.decode("latin-1")
                 if IDENT.match(name) and name not in LUA_KEYWORDS:
-                    return name         # getfenv().x is the global x
+                    return name         
             obj = self.prefix(e.obj)
             if isinstance(k, Const) and isinstance(k.v, bytes):
                 name = k.v.decode("latin-1")
@@ -1498,7 +1383,7 @@ class Renderer:
                     return "%s.%s" % (obj, name)
             return "%s[%s]" % (obj, self.expr(k))
         if isinstance(e, Bin) and e.op in FLIPPED and isinstance(e.a, Const) and not isinstance(e.b, Const):
-            # the VM only has < and <=: `0 < x` was `x > 0` (constants: no evaluation order)
+
             return self.expr_raw(Bin(FLIPPED[e.op], e.b, e.a), prec)
         if isinstance(e, Bin):
             op, p = BINOPS[e.op]
@@ -1539,8 +1424,7 @@ class Renderer:
         if type(e).__name__ == "Opaque":
             return e.src or "nil --[[ %s ]]" % e.kind
         if type(e).__name__ == "Vec":
-            # Luau folds Vector3.new(constants) into one vector constant (float32
-            # components: the shortest decimal for each, 9e9 rather than 8999999488)
+
             xyz = [f32_short(x) for x in e.xyz]
             if all(x == 0 for x in xyz):
                 return "Vector3.zero"
@@ -1561,13 +1445,12 @@ class Renderer:
 
     def call(self, e):
         fn, args = e.fn, e.args
-        # obj:method(...) when the first argument is the object the function was read from
+
         if isinstance(fn, Index) and isinstance(fn.key, Const) and isinstance(fn.key.v, bytes) and args.items:
             same = expr_key(args.items[0]) == expr_key(fn.obj) and not expr_key(fn.obj).startswith("X")
             obj_text = None
             if not same and type(args.items[0]) is type(fn.obj):
-                # an object expression inlined into both slots of a NAMECALL
-                # (evaluated once by the VM): same text -> method call
+
                 obj_text = self.prefix(fn.obj)
                 same = self.prefix(args.items[0]) == obj_text
             name = fn.key.v.decode("latin-1")
@@ -1614,7 +1497,7 @@ class Renderer:
         if not any("\n" in p for p in parts) and 4 * len(ind) + len(one) <= TABLE_WIDTH:
             return one
         if len(parts) == 1 and t.tail is None and isinstance(t.items[0][1], FuncE):
-            # a single function item: keep `{ function() ... end }`
+
             return "{ " + ", ".join(self.table_items(t)) + " }"
         return "{\n" + "".join(ind + "\t" + p + ",\n" for p in parts) + ind + "}"
 
@@ -1633,14 +1516,13 @@ class Renderer:
             parts.append(self.tail(t.tail))
         return parts
 
-    # statements
     def block(self, stmts, ind):
         out = []
         for st in stmts:
-            # nested functions render as one multi-line string: keep physical lines
+
             lines = self.stmt(st, ind)
             if out and lines and lines[0][len(ind):].startswith("("):
-                # `(f)(x)` after a statement would continue it as a call
+
                 lines[0] = ind + ";" + lines[0][len(ind):]
             for x in lines:
                 out += x.split("\n")
@@ -1649,12 +1531,12 @@ class Renderer:
     def stmt(self, st, ind):
         self.cur_ind = ind
         if isinstance(st, AssignS):
-            # extra targets would take further values of a trailing call
+
             vals = self.multi(st.values, trunc=len(st.targets) > len(st.values.items))
             tg = ", ".join(self.lvalue(t) for t in st.targets)
             if getattr(st, "is_local", False):
                 return [ind + "local %s = %s" % (tg, vals)]
-            # x = x + y  ->  x += y (a plain variable: nothing is evaluated twice)
+
             v = st.values.items[0] if len(st.values.items) == 1 and st.values.tail is None else None
             if len(st.targets) == 1 and isinstance(st.targets[0], (LocalName, Reg, Upval)) \
                     and isinstance(v, Bin) and v.op in COMPOUND and type(v.a) is type(st.targets[0]) \
@@ -1667,7 +1549,7 @@ class Renderer:
         if isinstance(st, TempDef):
             return [ind + "local t%s = table.pack(%s)" % (st.t, self.expr(st.call))]
         if isinstance(st, SetListS):
-            # tbl[start], tbl[start+1], ... = values (the values are evaluated once)
+
             if st.values.tail is None:
                 tg = ", ".join("%s[%d]" % (self.prefix(st.tbl), st.start + k) for k in range(len(st.values.items)))
                 return [ind + "%s = %s" % (tg, self.multi(st.values, trunc=False))] if tg else []
@@ -1700,8 +1582,7 @@ class Renderer:
         if isinstance(st, ST.SError):
             return [ind + "error(\"devirt: %s\")" % st.msg.replace("\\", "\\\\").replace("\"", "'")]
         if isinstance(st, ST.SGotoState):
-            # a jump the structurer could not express (e.g. a two-level break):
-            # fail loudly instead of silently running on
+
             return [ind + "error(\"devirt: unstructured jump to block_%s\") -- goto block_%s" % (st.target, st.target)]
         return [ind + "-- ?? %s" % type(st).__name__]
 
@@ -1743,7 +1624,6 @@ class Renderer:
             return [ind + "repeat"] + self.block(st.body, ind + "\t") + [ind + "until %s" % self.expr(st.cond)]
         return [ind + "while true do"] + self.block(st.body, ind + "\t") + [ind + "end"]
 
-
 def _utf8_at(b, i):
     """The character of a valid UTF-8 sequence starting at b[i] (multi-byte only), else None."""
     c = b[i]
@@ -1751,10 +1631,9 @@ def _utf8_at(b, i):
     if not n:
         return None
     try:
-        return bytes(b[i:i + n]).decode("utf-8")    # rejects overlongs, surrogates, short tails
+        return bytes(b[i:i + n]).decode("utf-8")    
     except UnicodeDecodeError:
         return None
-
 
 def _visible(ch, prev, nxt):
     """Printable as a literal: no controls, format chars (except a ZWJ inside
@@ -1764,12 +1643,7 @@ def _visible(ch, prev, nxt):
         return prev and nxt
     return unicodedata.category(ch)[0] not in "CZ"
 
-
-# newline inside a long string: a private-use code point (quote never writes
-# one literally), so re-indenting nested function lines can't reach the
-# string's content; backend.polish turns it back into "\n"
 LONG_NL = "\ue000"
-
 
 def long_string(b):
     """[==[...]==] for multi-line text (embedded source, JSON, ASCII art), else None."""
@@ -1791,10 +1665,9 @@ def long_string(b):
         if (s + close).find(close) == len(s):
             break
         n += 1
-    # a newline right after the opening bracket is skipped: keep a leading one
+
     body = ("\n" + s if s.startswith("\n") else s).replace("\n", LONG_NL)
     return "[" + "=" * n + "[" + body + close
-
 
 def quote(b):
     ls = long_string(b)
@@ -1825,7 +1698,7 @@ def quote(b):
         elif 32 <= c < 127:
             out.append(chr(c))
         elif i + 1 < len(b) and 48 <= b[i + 1] <= 57:
-            out.append("\\%03d" % c)    # "\2" then "69" would read as "\269"
+            out.append("\\%03d" % c)    
         else:
             out.append("\\%d" % c)
         i += 1

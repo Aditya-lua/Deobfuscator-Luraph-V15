@@ -1,22 +1,3 @@
-"""
-Variable names for devirtualized output (text pass, scope-aware).
-
-The lifter names locals after VM registers (r12, s3_1, ...). This pass parses
-the finished Luau with luau-ast, infers a name for every such local from how
-it is defined, and rewrites exactly the declaration and reference positions:
-
-  Instance.new("Frame")          -> frame          GetService("Players") -> Players
-  x:FindFirstChild("Humanoid")   -> humanoid       x.Character           -> character
-  x:GetChildren()                -> children       pcall(...)            -> ok, result
-  for _ in ipairs(players)       -> i, player      for _ in pairs(t)     -> k, v
-  numeric for                    -> i              require(a.Foo)        -> Foo
-
-A name is taken only if it cannot change what any reference resolves to: no
-reference of another local with that name lies inside this local's scope
-(shadowing), and names of globals are never used.
-
-    python names.py file.luau [-o out.luau]
-"""
 import json
 import os
 import re
@@ -49,9 +30,8 @@ GLOBAL_CALLS = {"tick": "now", "time": "now", "os.clock": "now", "os.time": "now
                 "coroutine.create": "thread", "task.spawn": "thread", "task.delay": "thread",
                 "Instance.new": "instance", "newproxy": "proxy", "rawget": "value", "next": "key"}
 
-
 WEAK = {"str", "n", "tbl", "flag", "fn", "value", "key", "kind", "num", "obj", "result"}
-# parameters of callbacks connected to these signals (same table as envlog's SIGNAL_PARAMS)
+
 SIGNAL_PARAMS = {
     "PlayerAdded": ["player"], "PlayerRemoving": ["player"],
     "CharacterAdded": ["character"], "CharacterRemoving": ["character"], "CharacterAppearanceLoaded": ["character"],
@@ -70,7 +50,6 @@ SIGNAL_PARAMS = {
     "StateChanged": ["old", "new"], "MoveToFinished": ["reached"], "Completed": ["playbackState"],
 }
 
-
 def str_arg_name(call):
     """f("RouterClient") -> RouterClient, x.get("TradeAPI/SendTrade") -> sendTrade:
     a call whose first argument names what it returns."""
@@ -83,13 +62,11 @@ def str_arg_name(call):
         return last if last[:1].isupper() and not last.isupper() else camel(last)
     return None
 
-
 def loc(s):
     a, b = s.split(" - ")
     l1, c1 = a.split(",")
     l2, c2 = b.split(",")
     return (int(l1), int(c1)), (int(l2), int(c2))
-
 
 def camel(s):
     """'UICorner' -> 'uiCorner', 'Humanoid Root' -> 'humanoidRoot'; None if unusable."""
@@ -97,7 +74,7 @@ def camel(s):
     if not parts:
         return None
     if len(parts) > 1:
-        # TARGET_BRAINROTS -> targetBrainrots (FOV Circle -> fovCircle)
+
         parts = [p.capitalize() if p.isupper() else p for p in parts]
     w = "".join(p[:1].upper() + p[1:] for p in parts)
     m = re.match(r"^([A-Z]+)([A-Z][a-z].*)$", w)
@@ -110,7 +87,6 @@ def camel(s):
         w = "n" + w
     return w[:32] if w else None
 
-
 def singular(name):
     if not name:
         return None
@@ -122,10 +98,8 @@ def singular(name):
         return name[:-1]
     return None
 
-
 def const_str(e):
     return e.get("value") if e and e.get("type") == "AstExprConstantString" else None
-
 
 def dotted(e):
     """'a.b.c' for global/index-name chains, else None."""
@@ -135,7 +109,6 @@ def dotted(e):
         d = dotted(e["expr"])
         return d + "." + e["index"] if d else None
     return None
-
 
 class Namer:
     def __init__(self, text):
@@ -151,11 +124,10 @@ class Namer:
         finally:
             os.remove(path)
         self.root = json.loads(out.decode("latin-1"))["root"]
-        self.locals = {}        # decl location -> info
+        self.locals = {}        
         self.globals = set()
         self.order = []
 
-    # ---- collection
     def local_info(self, node, scope):
         key = node["location"]
         info = self.locals.get(key)
@@ -181,8 +153,7 @@ class Namer:
             stend = loc(st["location"])[1]
             vals = st.get("values", [])
             for i, var in enumerate(st["vars"]):
-                # `local f = function` becomes `local function f` later (localfuncs.py):
-                # its scope then covers the body too
+
                 start = loc(st["location"])[0] if len(st["vars"]) == 1 and len(vals) == 1 \
                     and vals[0]["type"] == "AstExprFunction" else stend
                 info = self.local_info(var, (start, block_end))
@@ -203,7 +174,7 @@ class Namer:
             for v in vals:
                 self.visit_expr(v)
             for var, v in zip(st["vars"], vals):
-                # obj.Text = x / obj.BackgroundColor3 = x or default: x is a text / color
+
                 if v.get("type") == "AstExprBinary" and v.get("op") == "Or":
                     v = v["left"]
                 if var.get("type") == "AstExprIndexName" and v.get("type") == "AstExprLocal":
@@ -263,7 +234,7 @@ class Namer:
             self.visit_expr(st["var"])
             self.visit_expr(st["value"])
             return
-        # generic: expressions anywhere below
+
         for k, v in st.items():
             if isinstance(v, dict) and v.get("type", "").startswith("AstExpr"):
                 self.visit_expr(v)
@@ -286,12 +257,12 @@ class Namer:
             return
         if t == "AstExprCall":
             f = e.get("func", {})
-            # t[k](...) with a computed key: t is a dispatch table
+
             if f.get("type") == "AstExprIndexExpr" and f["expr"].get("type") == "AstExprLocal"                     and const_str(f.get("index")) is None:
                 info = self.locals.get(f["expr"]["local"]["location"])
                 if info is not None:
                     info["dispatch"] = True
-            # signal:Connect(function(input, gameProcessed) ...): parameters from the signal
+
             if f.get("type") == "AstExprIndexName" and f.get("index") in ("Connect", "Once", "ConnectParallel") \
                     and f["expr"].get("type") == "AstExprIndexName" and e.get("args"):
                 params = SIGNAL_PARAMS.get(f["expr"]["index"])
@@ -304,7 +275,7 @@ class Namer:
                     self.callback_params(e["args"][0], params)
                     return
         if t == "AstExprBinary" and e.get("op") == "Concat" and e["right"].get("type") == "AstExprLocal":
-            # "Speed: " .. n  ->  speed
+
             m = re.match(r"^([A-Za-z][A-Za-z ]{0,30}?)\s*[:=]\s*$", const_str(e["left"]) or "")
             info = self.locals.get(e["right"]["local"]["location"]) if m else None
             if info is not None:
@@ -327,12 +298,11 @@ class Namer:
                     if isinstance(x, dict) and x.get("type", "").startswith("AstExpr"):
                         self.visit_expr(x)
                     elif isinstance(x, dict) and "value" in x and isinstance(x["value"], dict):
-                        # table items {key=..., value=...}
+
                         if isinstance(x.get("key"), dict):
                             self.visit_expr(x["key"])
                         self.visit_expr(x["value"])
 
-    # ---- inference
     def callback_params(self, fn, params):
         """Name the parameters of a function (literal, or a local holding one) after the signal's."""
         if fn.get("type") == "AstExprLocal":
@@ -399,7 +369,7 @@ class Namer:
             elif a.get("type") == "AstExprCall" and a["func"].get("type") == "AstExprIndexName":
                 base = ("name", METHOD_NAMES.get(a["func"]["index"]))
             elif a.get("type") == "AstExprIndexName":
-                base = ("name", camel(a["index"]))      # pairs(data.Lines) -> line
+                base = ("name", camel(a["index"]))      
         if first.get("type") == "AstExprCall" and first["func"].get("type") == "AstExprIndexName"                 and first["func"]["index"] == "gmatch":
             return (["match"] + ["match%d" % i for i in range(2, n + 1)])[:n]
         key = "i" if fn == "ipairs" else "k"
@@ -451,23 +421,22 @@ class Namer:
                 if inner == "loadstring":
                     return "lib"
             if f.get("type") == "AstExprLocal":
-                # a helper of the script: its first word-like string argument
-                # (createButton(page, "Save Position", 8) -> savePosition)
+
                 nm = str_arg_name(e)
                 if nm:
                     return nm
                 for a in e.get("args") or []:
                     s = const_str(a)
                     if s is not None:
-                        s = re.sub(r"\s*:\s*\w*$", "", s)     # "Skeleton: ON" -> skeleton
-                        # a label ("Shield", "Save Position"), not an option string ("s", "slanf")
+                        s = re.sub(r"\s*:\s*\w*$", "", s)     
+
                         ok = re.match(r"^[A-Z][A-Za-z0-9 _]{1,30}$", s) and camel(s) not in KEYWORDS
                         return camel(s) if ok else None
             return str_arg_name(e)
         if t == "AstExprIndexName":
             d = dotted(e)
             if d and d.split(".")[0] in DATATYPES:
-                return DATATYPES[d.split(".")[0]]     # Vector3.zero -> vector
+                return DATATYPES[d.split(".")[0]]     
             return camel(e["index"])
         if t == "AstExprIndexExpr":
             s = const_str(e.get("index"))
@@ -478,7 +447,7 @@ class Namer:
             return "tbl"
         if t == "AstExprBinary":
             if e["op"] == "Or":
-                # `x or default`: named after x
+
                 left = self.infer(e["left"])
                 if left and left not in WEAK:
                     return left
@@ -505,7 +474,7 @@ class Namer:
     def base_name(self, info):
         h = info["hint"]
         if h == "arg" and (info.get("label") or info.get("prop")):
-            return info.get("label") or info["prop"]      # a parameter: named from use
+            return info.get("label") or info["prop"]      
         if isinstance(h, tuple):
             key, base = h
             if base is not None:
@@ -531,10 +500,9 @@ class Namer:
                 return nm
         return info.get("label") or "v"
 
-    # ---- naming
     def run(self):
         self.collect()
-        taken = {}          # name -> [infos]
+        taken = {}          
         reserved = self.globals | KEYWORDS
         for key in self.order:
             info = self.locals[key]
@@ -542,7 +510,7 @@ class Namer:
             if not GENERATED.match(info["name"]):
                 info["new"] = info["name"]
                 taken.setdefault(info["name"], []).append(info)
-        for key in sorted(self.order, key=lambda k: self.locals[k]["decl"]):     # numbered in reading order
+        for key in sorted(self.order, key=lambda k: self.locals[k]["decl"]):     
             info = self.locals[key]
             if "new" in info:
                 continue
@@ -581,17 +549,15 @@ class Namer:
             for (a, b) in info["spans"]:
                 edits.setdefault(a[0], []).append((a[1], b[1], info["name"], info["new"]))
         for ln, lst in edits.items():
-            s = lines[ln].encode("utf-8")       # luau-ast columns are byte offsets
+            s = lines[ln].encode("utf-8")       
             for c0, c1, old, new in sorted(lst, reverse=True):
                 if s[c0:c1] == old.encode("utf-8"):
                     s = s[:c0] + new.encode("utf-8") + s[c1:]
             lines[ln] = s.decode("utf-8")
         return "\n".join(lines)
 
-
 def rename_text(text):
     return Namer(text).run()
-
 
 def main():
     import argparse
@@ -604,7 +570,6 @@ def main():
     out = rename_text(text)
     with open(a.output or a.file, "w", encoding="utf-8", newline="\n") as f:
         f.write(out)
-
 
 if __name__ == "__main__":
     main()

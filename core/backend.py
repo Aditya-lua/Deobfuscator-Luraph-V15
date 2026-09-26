@@ -1,17 +1,6 @@
-"""
-Lifter back end, shared by every devirtualizer front end.
-
-A front end walks one VM function and produces its instruction graph as
-`order`: [(state key, ir.Node)], where a state key is a tuple starting
-(mode, pc, ...) and ir.Next(state).state.key(link) names the successor.
-lower() turns that into Luau lines: CFG (structure.build_cfg), loops,
-simplification, variables, structuring (goto elimination), idioms, render.
-The text passes (polish, finish) run once on the whole program.
-"""
 import os
 import sys
 import threading
-
 
 def lower(entry_key, order, D, link, prefix, upnames, closure):
     """Luau lines of one function.
@@ -35,13 +24,12 @@ def lower(entry_key, order, D, link, prefix, upnames, closure):
         entry, _ = ST.merge_equivalent(entry, blocks, D)
     entry = ST.thread_empty(entry, blocks)
     LP.recognize(entry, blocks, D)
-    # dropping the VM's loop bookkeeping leaves empty hops (e.g. `break` paths)
+
     entry = ST.thread_empty(entry, blocks)
     CG.simplify_blocks(blocks, D)
     own = set(VR.rename(entry, blocks, prefix, set()).values())
     names = {("up", i): nm for i, nm in (upnames or {}).items()}
 
-    # child closures, now that the captured variables have names
     def conv(x):
         return closure(x, names) if isinstance(x, ClosureExpr) else None
     for b in blocks.values():
@@ -66,45 +54,42 @@ def lower(entry_key, order, D, link, prefix, upnames, closure):
     body = IDI.while_cond(body)
     body = IDI.strip_trailing_continue(body)
     body = IDI.conditions(body)
-    body = IDI.while_cond(body)     # (again: `conditions` joins nested ifs into one `and` test)
+    body = IDI.while_cond(body)     
     body = IDI.strip_trailing_continue(body)
     body = IDI.loop_vars(body)
     body = IDI.strip_trailing_return(body)
     if getattr(D, "INLINE_CONST_LOCALS", False):
         body = IDI.inline_const_locals(body)
-        body = IDI.fold_single_use(body)    # (literals no longer stand between a temp and its use)
+        body = IDI.fold_single_use(body)    
     body = VR.declare(body, (), own)
     body = VR.limit_locals(body)
     params = VR.extract_params(body)
     rend = CG.Renderer(names)
     return rend.block(body, ""), params, nerr, sr.fallbacks
 
-
 def polish(text):
     """Whole-program text passes: local names from use (names.py, unless
     DEVIRT_NO_NAMES), `local function` (localfuncs.py). Each is skipped
     with a warning if it fails."""
     import codegen
-    text = text.replace(codegen.LONG_NL, "\n")     # long strings' newlines, kept out of re-indenting
+    text = text.replace(codegen.LONG_NL, "\n")     
     if not os.environ.get("DEVIRT_NO_NAMES"):
         import names
         try:
             text = names.rename_text(text)
-        except Exception as ex:  # noqa: BLE001 - keep the register names
+        except Exception as ex:  
             print("[!] naming pass failed: %s" % ex, file=sys.stderr)
     import localfuncs
     try:
         text = localfuncs.rewrite(text)
-    except Exception as ex:  # noqa: BLE001
+    except Exception as ex:  
         print("[!] local function pass failed: %s" % ex, file=sys.stderr)
     return text
-
 
 def finish_text(text):
     """Blank lines between blocks (only for the final output, not every round)."""
     import spacing
     return spacing.space(text)
-
 
 def run_big_stack(fn, *a):
     """Deeply nested scripts need deep recursion: run in a thread with a big stack."""
@@ -115,7 +100,7 @@ def run_big_stack(fn, *a):
     def target():
         try:
             res["v"] = fn(*a)
-        except BaseException as ex:  # noqa: BLE001
+        except BaseException as ex:  
             res["e"] = ex
     t = threading.Thread(target=target)
     t.start()

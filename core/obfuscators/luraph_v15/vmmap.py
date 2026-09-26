@@ -1,9 +1,3 @@
-"""
-Static helper: maps every Luraph interpreter dispatch loop to its opcode
-handlers (opcode -> handler source) using luau-ast's JSON output.
-
-Usage: python obfuscators/luraph_v15/vmmap.py <protected.luau> [dispatch_index] [opcode...]
-"""
 import json
 import os
 import subprocess
@@ -12,7 +6,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 BIN_DIR = os.path.join(ROOT, "..", "bin") if os.path.exists(os.path.join(ROOT, "..", "bin")) else os.path.join(ROOT, "bin")
-
 
 def load_ast(path):
     exe = os.path.join(BIN_DIR, "luau-ast.exe" if os.name == "nt" else "luau-ast")
@@ -24,13 +17,11 @@ def load_ast(path):
     out = r.stdout
     return json.loads(out.decode("latin-1"))["root"]
 
-
 def loc(node):
     a, b = node["location"].split(" - ")
     l1, c1 = map(int, a.split(","))
     l2, c2 = map(int, b.split(","))
     return l1, c1, l2, c2
-
 
 def text_of(lines, node):
     l1, c1, l2, c2 = loc(node)
@@ -38,7 +29,6 @@ def text_of(lines, node):
         return lines[l1][c1:c2]
     parts = [lines[l1][c1:]] + lines[l1 + 1:l2] + [lines[l2][:c2]]
     return "\n".join(parts)
-
 
 def walk(node, fn):
     if isinstance(node, dict):
@@ -49,12 +39,10 @@ def walk(node, fn):
         for v in node:
             walk(v, fn)
 
-
 def local_name(expr):
     if expr.get("type") == "AstExprLocal":
         return expr["local"]["name"]
     return None
-
 
 def find_dispatchers(root):
     """while true do local op = ARR[PC]; if-tree ... end"""
@@ -67,9 +55,7 @@ def find_dispatchers(root):
         if cond.get("type") != "AstExprConstantBool" or not cond.get("value"):
             return
         body = n["body"]["body"]
-        # `local op = ARR[PC]` or `op = ARR[PC]` (op declared by the VM function);
-        # extra targets may follow and are set to nil (`local op,x=ARR[PC]`,
-        # `op,x=ARR[PC]`)
+
         if len(body) < 2 or body[0]["type"] not in ("AstStatLocal", "AstStatAssign"):
             return
         st = body[0]
@@ -93,13 +79,11 @@ def find_dispatchers(root):
     walk(root, visit)
     return found
 
-
 OPS = {"CompareLt": lambda a, b: a < b, "CompareLe": lambda a, b: a <= b,
        "CompareGt": lambda a, b: a > b, "CompareGe": lambda a, b: a >= b,
        "CompareEq": lambda a, b: a == b, "CompareNe": lambda a, b: a != b}
 FLIP = {"CompareLt": "CompareGt", "CompareLe": "CompareGe", "CompareGt": "CompareLt",
         "CompareGe": "CompareLe", "CompareEq": "CompareEq", "CompareNe": "CompareNe"}
-
 
 def eval_cond(cond, var, value):
     """Evaluate `var <op> const` for a concrete opcode value; None if not such a test."""
@@ -112,7 +96,6 @@ def eval_cond(cond, var, value):
     if local_name(r) == var and l["type"] == "AstExprConstantNumber":
         return OPS[FLIP[op]](value, l["value"])
     return None
-
 
 def resolve(tree, var, value):
     """Follow the if-tree for one opcode value and return the handler block."""
@@ -138,7 +121,6 @@ def resolve(tree, var, value):
             continue
         return node
 
-
 def handler_map(disp, lines, max_op=256):
     handlers = {}
     for op in range(max_op):
@@ -148,7 +130,6 @@ def handler_map(disp, lines, max_op=256):
         key = blk["location"]
         handlers.setdefault(key, {"ops": [], "node": blk})["ops"].append(op)
     return handlers
-
 
 def main():
     path = sys.argv[1]
@@ -169,10 +150,8 @@ def main():
         print("---- op %d" % op)
         print(text_of(lines, blk) if blk else "<none>")
 
-
 if __name__ == "__main__":
     main()
-
 
 def instrument(src, disp_index, probes, root=None, tmp_path=None):
     """Insert Lua code at the start of chosen opcode handlers of one dispatch loop.
@@ -190,13 +169,12 @@ def instrument(src, disp_index, probes, root=None, tmp_path=None):
         if blk is None:
             continue
         l1, c1, _, _ = loc(blk)
-        # block location starts right at the handler's first statement
+
         inserts.append((l1, c1, code))
     for l1, c1, code in sorted(inserts, reverse=True):
         s = lines[l1]
         lines[l1] = s[:c1] + " " + code + " " + s[c1:]
     return "\n".join(lines)
-
 
 def instrument_post(src, disp_index, root, make_code, reg="Z", pc="W"):
     """Append logging after simple `REG[..]=...` handlers. make_code(op, dest_expr) -> lua."""
@@ -221,11 +199,9 @@ def instrument_post(src, disp_index, root, make_code, reg="Z", pc="W"):
         lines[l2] = s[:c2] + " " + code + " " + s[c2:]
     return "\n".join(lines)
 
-
 def loop_names(disp):
     """(register array, pc variable) used by a dispatch loop's handlers."""
     return ("Z", "W") if disp["pc"] == "W" else ("l", "O")
-
 
 def post_inserts(src_lines, disp, make_code):
     import re as _re
@@ -242,7 +218,6 @@ def post_inserts(src_lines, disp, make_code):
         l1, c1, l2, c2 = loc(v["node"])
         out.append((l2, c2, make_code(v["ops"][0], m.group(1), pc)))
     return out
-
 
 def instrument_everything(src, root, make_post, make_loop):
     """Post-log simple handlers in every loop and log each dispatched instruction."""
@@ -262,7 +237,6 @@ def instrument_everything(src, root, make_post, make_loop):
         return m.group(0) + make_loop(k[0], m.group(1), m.group(3))
     return _re.sub(r"while true do (?:local )?([A-Za-z_]+)(?:,[A-Za-z_]+)*=([A-Za-z_]+)\[([A-Za-z_]+)\];", rep, out)
 
-
 def closure_entries(root):
     """For each VM interpreter closure: (line, col of its first statement, proto variable name)."""
     disp_nodes = [d["node"] for d in find_dispatchers(root)]
@@ -276,9 +250,7 @@ def closure_entries(root):
                 inner = next(f for f in reversed(stack) if f.get("vararg") and not f["args"])
                 outer = next(f for f in reversed(stack) if len(f["args"]) >= 2)
                 l1, c1, _, _ = loc(inner["body"]["body"][0])
-                # keyed by the proto parameter: parameter 1 is not always the
-                # proto (function(g, upvals, proto, ...)), and an upvalue list
-                # can be shared or false, which would merge protos
+
                 seen[(l1, c1)] = outer["args"][_maker_params(outer)[0]]["name"]
             for v in n.values():
                 walk(v, stack)
@@ -287,7 +259,6 @@ def closure_entries(root):
                 walk(v, stack)
     walk(root, [])
     return [(l, c, name) for (l, c), name in seen.items()]
-
 
 def closure_makers(root):
     """For each VM closure template: (line, col just after the statement that
@@ -323,11 +294,9 @@ def closure_makers(root):
     walk(root, [], [])
     return [(l, c, var, pv) for (l, c), (var, pv) in seen.items()]
 
-
 def decl_key(local):
     """Identity of a local: its declaration location."""
     return local["location"]
-
 
 def maker_info(root):
     """closure_makers() plus what the runtime capture needs: for each maker,
@@ -360,8 +329,7 @@ def maker_info(root):
                                     out[(l2, c2)] = {"at": (l2, c2), "var": local_name(v),
                                                      "proto": stack[oi]["args"][pi]["name"],
                                                      "proto_index": pi, "upvals_index": ui,
-                                                     # key the entry hooks number protos by (__PID);
-                                                     # closure -> proto attribution must use the same
+
                                                      "pf_key": stack[oi]["args"][pi]["name"],
                                                      "maker": stack[oi], "vm": clo, "stmt": st}
             for v in n.values():
@@ -373,7 +341,6 @@ def maker_info(root):
     for info in out.values():
         info["captures"] = _captures(info)
     return list(out.values())
-
 
 def _maker_params(maker):
     """(proto parameter index, upvalue-list parameter index) of a closure maker.
@@ -387,7 +354,7 @@ def _maker_params(maker):
     for i, a in enumerate(args):
         visible[a["name"]] = i
     counts = {}
-    kcounts = {}    # P[<number>]: the proto of makers that index it directly
+    kcounts = {}    
     used = set()
 
     def visit(n):
@@ -414,14 +381,13 @@ def _maker_params(maker):
     pi = max(cands, key=lambda i: (counts.get(args[i]["location"], 0), i == 1)) if cands else 1
     if not counts.get(args[pi]["location"]):
         pi = 1
-        # function(v, R, R, R, g, g) with `B = R[11]`: the visible R
+
         kc = [i for i in cands if kcounts.get(args[i]["location"])]
         if kc:
             pi = max(kc, key=lambda i: kcounts[args[i]["location"]])
     others = sorted(i for i in visible.values() if i not in (0, pi) and args[i]["location"] in used)
     ui = others[0] if others else pi + 1
     return pi, ui
-
 
 def _decls_in(fn):
     """Declaration keys of locals declared directly in fn (params and body,
@@ -453,7 +419,6 @@ def _decls_in(fn):
     visit(fn["body"])
     return keys
 
-
 def _captures(info):
     maker_decls = _decls_in(info["maker"])
     used = {}
@@ -473,7 +438,7 @@ def _captures(info):
     names = {}
     for k, name in used.items():
         names.setdefault(name, []).append(k)
-    # a name declared twice at maker level would be ambiguous at the insertion point
+
     dup = {nm for nm, ks in names.items() if len(ks) > 1}
     by_name = {}
     for k, nm in maker_decls.items():

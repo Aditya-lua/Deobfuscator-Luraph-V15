@@ -1,14 +1,3 @@
-"""
-Luraph v15 pipeline (see LURAPH.md).
-
-The protected script runs in the fake environment with every VM closure
-instrumented (patch_entries). Checks that cannot be emulated exactly end in
-a trap that corrupts the bytecode; the runtime reports which function made
-that call and the script runs again with that function turned into a no-op.
-Loadstring'd VM chunks are instrumented the same way and passed back.
-Then the captured protos are lifted (devirt.py), with constant rounds for
-code that never ran.
-"""
 import os
 import re
 import sys
@@ -19,8 +8,7 @@ import traceout as trace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_RERUNS = 12
-SPIN_CHECKS = 24    # watchdog checks (2^20 VM steps each) without environment access = endless loop
-
+SPIN_CHECKS = 24    
 
 def patch_spin(src):
     """Spin watchdog (envlog's --cfg spin): every VM dispatch loop head counts
@@ -29,7 +17,6 @@ def patch_spin(src):
     return re.sub(r"while true do (?:local )?[A-Za-z_]+(?:,[A-Za-z_]+)*=[A-Za-z_]+\[[A-Za-z_]+\];",
                   lambda m: m.group(0) + "__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;", src)
 
-
 def patch_chunk(src, tmpdir):
     """Instrument a loadstring'd VM chunk like the main script."""
     path = os.path.join(tmpdir, "_chunk_%s.luau" % harness.chunk_key(src))
@@ -37,12 +24,11 @@ def patch_chunk(src, tmpdir):
         f.write(src)
     try:
         return patch_entries(src, path)
-    except Exception as e:  # not parseable by luau-ast: run it as is
+    except Exception as e:  
         print("[!] could not instrument chunk (%s)" % e, file=sys.stderr)
         return src
     finally:
         os.remove(path)
-
 
 def patch_entries(source, path):
     """Give every VM closure an entry hook. It only uses table operations (no
@@ -54,26 +40,19 @@ def patch_entries(source, path):
     lines = source.split("\n")
     edits = []
     for l1, c1, pv in vmmap.closure_entries(root):
-        # no locals: they would enlarge every VM frame, and Luraph mixes the
-        # depth its stack-overflow probe reaches into its decryption keys.
-        # __PLAST[pid] = entry number of the latest entry of that proto (it
-        # tells invocations apart when statements are attributed to protos)
+
         k = "(%s or __PID)" % pv
         edits.append((l1, c1, ("if not __PID[{k}] then __PID.n=__PID.n+1;__PID[{k}]=__PID.n;end;"
                                "__ENT.n=__ENT.n+1;__ENT[__ENT.n%64]=__PID[{k}];__PLAST[__PID[{k}]]=__ENT.n;"
                                "if __SKIPP[__PID[{k}]] then return end;").format(k=k)))
-    # closure -> proto, recorded where the closure is made (not per call), so
-    # the runtime can map the functions on the Lua stack back to protos
+
     tag = harness.chunk_key(source)
     for info in vmmap.maker_info(root):
         (l2, c2), var, pv = info["at"], info["var"], info["proto"]
         code = " __PF[%s]=%s " % (var, info.get("pf_key", pv))
-        # devirtualizer capture: once per proto, the maker-level values the VM
-        # closure uses (operand arrays, constants, helpers). Table operations
-        # only, like the entry hook; runs where the closure is made, not per call.
+
         cap = "".join("__PA[%s].%s=%s;" % (pv, nm, nm) for nm in info["captures"])
-        # __PK: one closure per proto, for calls the devirtualizer asks the
-        # runtime to evaluate (LPH_ENCSTR-style string decryptors)
+
         code += ("if __PA and not __PA[%s] then __PA[%s]={};__PA.n=__PA.n+1;__PA[%s].__seq=__PA.n;"
                  "__PA[%s].__maker=\"%s@%d,%d\";__PK[%s]=%s;%s end "
                  % (pv, pv, pv, pv, tag, l2, c2, info.get("pf_key", pv), var, cap))
@@ -81,7 +60,6 @@ def patch_entries(source, path):
     for l, c, code in sorted(edits, reverse=True):
         lines[l] = lines[l][:c] + code + lines[l][c:]
     return "\n".join(lines)
-
 
 def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
     """Lift the captured protos; constants that only Luraph's lazy decoder can
@@ -96,20 +74,14 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
     last_bufs = ""
     text = None
     rounds = args.devirt_rounds
-    # Intermediate rounds only need the constant requests and decrypted
-    # strings, which come from walking each function: they skip the
-    # structuring/codegen/naming and reuse the walks of functions that asked
-    # for nothing (devirt.collect_requests). The text comes from one full lift
-    # at the fixed point; if that lift still asks for something new, the
-    # remaining rounds are full lifts (the old way).
+
     quick = not os.environ.get("DEVIRT_FULL_ROUNDS")
     cache = devirt.WalkCache()
     t0 = time.time()
     last_errors = None
     for rnd in range(1, rounds + 1):
         t1 = time.time()
-        # Fast path: if previous round resolved all constants with 0 errors,
-        # go directly to the final lift_program instead of doing a redundant walk pass.
+
         if quick and last_errors == 0:
             full = True
         else:
@@ -147,7 +119,7 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
         last_bufs = bufs
         c = dict(cfg)
         c["force_req"] = ";".join(sorted(requested))
-        # strings decrypted in place by lifted code the runtime never ran
+
         c["force_buf"] = bufs
         t1 = time.time()
         body, err = rerun(c)
@@ -166,7 +138,6 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
     prefix = (header + "\n") if header else ""
     job.write(dpath, prefix + devirt.finish_text(text) + "\n")
 
-
 def run(job):
     """The whole Luraph pipeline; returns the result file's path."""
     args = job.args
@@ -182,20 +153,17 @@ def run(job):
     bridge = runner.bridge
 
     skip = []
-    # spin watchdog from the first run: a script ending in a pure-VM endless
-    # loop (tamper response, wait for remote code) then stops after a few
-    # seconds instead of running into the timeout. DEOB_SPIN_LATE=1: only
-    # after a timeout (the old way)
+
     spin = not os.environ.get("DEOB_SPIN_LATE")
     if spin:
         patched = patch_spin(patched)
     chunks = {}
-    raw_chunks = {}     # key -> original source of a loadstring'd VM chunk (for devirt)
+    raw_chunks = {}     
     body = None
-    trapped = None      # (body, raw output) of the run that hit the last trap
+    trapped = None      
     cfg = None
     for attempt in range(1, args.max_runs + 1):
-        # (same keys as harness.base_cfg, in the order the harness always had)
+
         cfg = {"time_budget": args.budget, "dump_strings": args.strings, "executor": args.executor,
                "skip_protos": skip}
         if args.input_text is not None:
@@ -210,8 +178,7 @@ def run(job):
         print("[*] tracing %s (run %d)..." % (job.input, attempt), file=sys.stderr)
         body, err = runner.run(patched, cfg, chunks)
         if body is None and not spin and err.startswith("timed out") and not bridge:
-            # stuck in the script's own code (no environment access, so the
-            # runtime never regains control): rerun with a spin watchdog
+
             print("[*] the script never finished; re-running with a spin watchdog", file=sys.stderr)
             spin = True
             patched = patch_spin(patched)
@@ -239,9 +206,7 @@ def run(job):
             continue
         trig = re.search(r"\x00TRIGGER (\d+)", body)
         if trapped is not None and trace.stmt_count(body) < trace.stmt_count(trapped[0]):
-            # disabling that function made the script stop earlier: the trap
-            # is the script's own check (e.g. LPH_CRASH() after a failed
-            # license check), not an environment divergence. Keep that run.
+
             print("[*] disabling function #%d made the script stop earlier: it is the script's own "
                   "crash check; keeping run %d" % (skip[-1], attempt - 1), file=sys.stderr)
             body, harness.LAST_RAW[0] = trapped
@@ -258,7 +223,7 @@ def run(job):
               file=sys.stderr)
         skip.append(pid)
 
-    run_text = harness.trace_text(body)     # the run the constant rounds must repeat
+    run_text = harness.trace_text(body)     
     body = harness.p2d_miss(body, cache_path)
     if not devirt_on:
         runner.finish()
@@ -280,8 +245,6 @@ def run(job):
     def write_trace():
         job.write(job.trace_path, trace.render(text, args))
 
-    # the trace is the result only without devirtualization or when lifting
-    # fails: otherwise skip its readability pass (minutes on a 250k-statement trace)
     if not (devirt_on and not job.debug):
         write_trace()
     if strings is not None:
@@ -294,14 +257,14 @@ def run(job):
         else:
             job.write(ppath, protos_json)
             if devirt_on:
-                # the lifter needs the original source of every VM chunk
+
                 chunk_paths = [job.write(job.path(".chunk_%s.luau" % key), src, encoding="latin-1")
                                for key, src in raw_chunks.items()]
                 lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
     runner.finish()
     trace.status_line(body)
     if devirt_on and os.path.exists(dpath):
-        # a lift full of calls to nil misread the VM: the trace is the better result
+
         with open(dpath, encoding="utf-8", errors="replace") as f:
             lifted = f.read()
         nil_calls = lifted.count("(nil)(")
@@ -319,7 +282,6 @@ def run(job):
             write_trace()
     return job.trace_path
 
-
 def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths):
     """devirtualize() with its constant rounds answered by one long-lived
     harness (started now, so the script runs while round 1 walks); a fresh
@@ -327,10 +289,19 @@ def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
     args = job.args
     bridge = runner.bridge
     server = [None]
-    synced = [False]    # the long-lived harness made the current dump
+    synced = [False]    
     if not bridge and not os.environ.get("DEOB_NO_SERVE"):
-        server[0] = harness.HarnessServer(runner.luau, patched, cfg, chunks)
-        server.append(False)    # its first run not checked yet
+        hs = harness.HarnessServer(runner.luau, patched, cfg, chunks)
+        server[0] = hs
+        first, err = hs.reply(args.timeout)
+        server.append(True)
+        if first is not None and harness.same_trace(harness.trace_text(first), run_text):
+            synced[0] = True
+        else:
+            if first is None:
+                print("[!] the long-lived harness failed: %s; running the script once per round instead" % err[-300:], file=sys.stderr)
+            hs.close()
+            server[0] = None    
 
     def live():
         hs = server[0]
@@ -369,7 +340,7 @@ def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
     try:
         devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths, live)
     except Exception as e:
-        # never lose the run over a lifter bug: the trace is still a result
+
         print("[!] devirtualization failed: %s: %s" % (type(e).__name__, e), file=sys.stderr)
         if os.environ.get("DEVIRT_TB"):
             import traceback

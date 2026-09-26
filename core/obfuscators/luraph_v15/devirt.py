@@ -936,6 +936,10 @@ class ProtoLifter:
         raise Unsupported("varargs outside vararg function")
 
     def as_expr(self, v):
+        if isinstance(v, BoxPart):
+            return Index(Upval(v.idx), self.as_expr(v.k))
+        if isinstance(v, BoxProxy):
+            return Upval(v.idx)
         if isinstance(v, Expr):
             return v
         if v is None or isinstance(v, (bool, int, float, bytes)):
@@ -946,10 +950,6 @@ class ProtoLifter:
             return v
         if isinstance(v, Vec):
             return v
-        if isinstance(v, BoxPart):
-            return Index(Upval(v.idx), self.as_expr(v.k))
-        if isinstance(v, BoxProxy):
-            return Upval(v.idx)
         if isinstance(v, EnvTable):
             return Global("_ENV")
         if isinstance(v, LuaFunc) and isinstance(self.vm, JitModel):

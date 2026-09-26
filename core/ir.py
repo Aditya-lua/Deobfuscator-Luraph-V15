@@ -179,7 +179,7 @@ def fmt_const(v):
     if v is False:
         return "false"
     if isinstance(v, bytes):
-        return '"%s"' % "".join(chr(c) if 32 <= c < 127 and c not in (34, 92) else "\%d" % c for c in v)
+        return '"%s"' % "".join(chr(c) if 32 <= c < 127 and c not in (34, 92) else "\\%d" % c for c in v)
     if isinstance(v, (int, float)):
         return S.fmt_num(v)
     return repr(v)

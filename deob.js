@@ -6,9 +6,11 @@ const path = require('path');
 const detectModule = require('./src/detect');
 const driver = require('./src/driver');
 
+const SUPPORTED_EXTENSIONS = ['.lua', '.luau'];
+
 function parseArgs(argv) {
   const args = {
-    input: null,
+    inputs: [],
     output: null,
     detect: false,
     noDevirt: false,
@@ -26,7 +28,6 @@ function parseArgs(argv) {
     inputText: null,
   };
 
-  const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--detect') { args.detect = true; }
@@ -44,10 +45,9 @@ function parseArgs(argv) {
     else if (a === '--devirt-rounds') { args.devirtRounds = parseInt(argv[++i], 10); }
     else if (a === '--executor') { args.executor = argv[++i]; }
     else if (a === '--input-text') { args.inputText = argv[++i]; }
-    else if (!a.startsWith('-')) { positional.push(a); }
+    else if (!a.startsWith('-')) { args.inputs.push(a); }
   }
 
-  args.input = positional[0] || null;
   return args;
 }
 
@@ -89,25 +89,50 @@ class Job {
   }
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+function collectInputFiles(rawPaths) {
+  const files = [];
+  const seen = new Set();
 
-  if (!args.input) {
-    console.error('Usage: node deob.js <input.lua> [-o <output.lua>] [--no-devirt] [--debug] [--detect]');
-    process.exit(2);
+  for (const raw of rawPaths) {
+    const abs = path.resolve(raw);
+    if (!fs.existsSync(abs)) {
+      process.stderr.write(`[!] path not found, skipping: ${raw}\n`);
+      continue;
+    }
+    const stat = fs.statSync(abs);
+    if (stat.isDirectory()) {
+      const entries = fs.readdirSync(abs, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && SUPPORTED_EXTENSIONS.includes(path.extname(entry.name).toLowerCase())) {
+          const filePath = path.join(abs, entry.name);
+          if (!seen.has(filePath)) {
+            seen.add(filePath);
+            files.push(filePath);
+          }
+        }
+      }
+    } else if (stat.isFile()) {
+      const ext = path.extname(abs).toLowerCase();
+      if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+        process.stderr.write(`[!] unsupported extension for ${raw} (expected ${SUPPORTED_EXTENSIONS.join(', ')})\n`);
+        continue;
+      }
+      if (!seen.has(abs)) {
+        seen.add(abs);
+        files.push(abs);
+      }
+    }
   }
 
-  const absInput = path.resolve(args.input);
-  if (!fs.existsSync(absInput)) {
-    console.error(`[!] file not found: ${args.input}`);
-    process.exit(1);
-  }
+  return files;
+}
 
+async function processFile(absInput, args) {
   const source = fs.readFileSync(absInput, 'latin1');
   const { plugin, confidence } = detectModule.detect(source);
 
   if (args.detect) {
-    console.log(`${plugin.name}\t${confidence.toFixed(2)}\t${plugin.label}`);
+    console.log(`${path.basename(absInput)}\t${plugin.name}\t${confidence.toFixed(2)}\t${plugin.label}`);
     return;
   }
 
@@ -123,7 +148,9 @@ async function main() {
   const tracePath = args.debug
     ? (args.output || path.join(outdir, tracename))
     : path.join(workdir, tracename);
-  const final = args.output || path.join(outdir, path.basename(absInput));
+  const final = (args.output && args.inputs.length === 1)
+    ? args.output
+    : path.join(outdir, path.basename(absInput));
 
   fs.mkdirSync(path.dirname(path.resolve(final)), { recursive: true });
 
@@ -151,14 +178,13 @@ async function main() {
 
     if (final && result && fs.existsSync(result)) {
       let content = fs.readFileSync(result, 'utf8');
-
       content = content.replace(/^(\s*--(?:[ \t]*(?:Deobfuscated by|Detected obfuscation|Local names are inferred|source:|NOTE: reconstructed|during the trace)[^\n]*\n?|\s*\n))+/, '');
       fs.writeFileSync(final, content, 'utf8');
       process.stderr.write(`[+] result: ${final}\n`);
-    } else {
-      console.error('[!] no result');
-      process.exit(1);
+      return final;
     }
+    process.stderr.write(`[!] no result for ${path.basename(absInput)}\n`);
+    return null;
   } finally {
     if (workdir && fs.existsSync(workdir)) {
       try { fs.rmSync(workdir, { recursive: true, force: true }); } catch {}
@@ -166,7 +192,53 @@ async function main() {
   }
 }
 
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.inputs.length === 0) {
+    console.error('Usage: node deob.js <input.lua | folder> [more_files_or_folders...] [-o <output.lua>] [--no-devirt] [--debug] [--detect]');
+    process.exit(2);
+  }
+
+  const files = collectInputFiles(args.inputs);
+  if (files.length === 0) {
+    console.error('[!] no valid .lua / .luau input files found');
+    process.exit(1);
+  }
+
+  if (args.detect) {
+    for (const file of files) {
+      const source = fs.readFileSync(file, 'latin1');
+      const { plugin, confidence } = detectModule.detect(source);
+      console.log(`${path.basename(file)}\t${plugin.name}\t${confidence.toFixed(2)}\t${plugin.label}`);
+    }
+    return;
+  }
+
+  if (files.length > 1 && args.output) {
+    process.stderr.write('[!] --output is ignored for multiple inputs (each file goes into its own output/ folder)\n');
+  }
+
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const file of files) {
+    process.stderr.write(`\n[*] processing ${file}\n`);
+    try {
+      const res = await processFile(file, args);
+      if (res) succeeded++;
+      else failed++;
+    } catch (err) {
+      process.stderr.write(`[!] failed on ${path.basename(file)}: ${err.message || err}\n`);
+      failed++;
+    }
+  }
+
+  process.stderr.write(`\n[*] done: ${succeeded} succeeded, ${failed} failed out of ${files.length}\n`);
+  if (failed > 0 && succeeded === 0) process.exit(1);
+}
+
 main().catch(err => {
-  console.error('[!] Fatal error:', err.message || err);
+  process.stderr.write('[!] Fatal error: ' + (err.message || err) + '\n');
   process.exit(1);
 });

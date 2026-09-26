@@ -185,4 +185,5 @@ For in-depth explanations of the reverse-engineering methodology, SCCP symbolic 
 This project is open-source under the [MIT License](LICENSE).
 
 ## Credits
-Thanks to **ccjvwsod** on Discord
+Thanks source to **ccjvwsod** on Discord
+This version was rebuilt by me using Node so that multiple Deobf instances can run simultaneously

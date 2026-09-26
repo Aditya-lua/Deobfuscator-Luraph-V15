@@ -1,0 +1,4 @@
+# Mark internal backend as vendored so GitHub shows JavaScript as primary language
+core/** linguist-vendored
+bin/** linguist-vendored
+runtime/** linguist-vendored

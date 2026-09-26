@@ -1,22 +1,11 @@
-"""
-Plugin interface: one Obfuscator subclass per supported obfuscator (and
-version). deob.py detects which plugin fits an input and calls it.
-
-A plugin gets a Job (input, options, output paths), writes its files and
-returns the path of the one result file (deob.py copies it to
-output/<input name>), or None when it produced nothing. Everything shared
-(the fake Roblox environment, trace rendering, the lifter back end) lives
-in the deobf/ root modules: harness.py, traceout.py, ir.py, backend.py, ...
-"""
 import os
 import re
 import sys
 
-
 class Obfuscator:
-    name = ""           # CLI name (--obfuscator NAME), also the package name
-    label = ""          # human-readable, e.g. "Luraph v15"
-    doc = ""            # the plugin's notes file in the Decompiler folder (e.g. LURAPH.md)
+    name = ""           
+    label = ""          
+    doc = ""            
 
     def detect(self, source):
         """Confidence 0..1 that `source` (latin-1 text) was made by this
@@ -30,7 +19,6 @@ class Obfuscator:
     def deobfuscate(self, job):
         """Run the pipeline; return the result file's path or None."""
         raise NotImplementedError
-
 
 class Job:
     """One input file being deobfuscated.
@@ -47,7 +35,7 @@ class Job:
     def __init__(self, input_path, source, args, trace_path, debug, obfuscator=""):
         self.input = input_path
         self.source = source
-        self.source_path = input_path   # file holding `source` (a plugin may normalize it into a copy)
+        self.source_path = input_path   
         self.args = args
         self.trace_path = trace_path
         self.debug = debug

@@ -1,26 +1,7 @@
-"""
-Loop recognition for the devirtualizer, on the raw CFG (before expression
-cleanup), where Luraph's loop protocol is still visible:
-
-numeric for (FORPREP / FORLOOP handlers):
-    prep:    Z_d = step + 0 ; P_d = limit + 0 ; a_d = start - Z_d ; goto H
-    H:       a_d = a_d + Z_d
-             if Z_d <= 0 then (if a_d >= P_d then rX = a_d; goto BODY else goto EXIT)
-                         else (if a_d <= P_d then rX = a_d; goto BODY else goto EXIT)
-generic for (coroutine-driven iterator):
-    prep:    a_d = geniter(vm, f, s, ctl) ; goto H
-    H:       T = a_d() ; if T[1] then rA = T[2]; rB = T[3]; goto BODY else goto EXIT
-
-Both become a block of kind "for"/"forin" whose successors are [BODY, EXIT];
-the structurer turns it into a `for` statement. Pseudo loop-state
-assignments left over (saving/restoring the VM's loop stack) are dropped.
-"""
 from luasym import Const, Reg, Pseudo, Bin, TempVal
-
 
 def is_pseudo(e, name=None, depth=None):
     return isinstance(e, Pseudo) and (name is None or e.name == name) and (depth is None or e.depth == depth)
-
 
 def recognize(entry, blocks, D):
     found = {"for": 0, "forin": 0}
@@ -31,8 +12,7 @@ def recognize(entry, blocks, D):
             found["for"] += 1
         elif try_generic(h, blocks, D):
             found["forin"] += 1
-    # drop VM loop bookkeeping (LPH_JIT loop variables stay while a loop
-    # that was not recognized still reads them)
+
     read = set()
     for b in blocks.values():
         todo = [b.cond, getattr(b, "values", None)]
@@ -52,7 +32,6 @@ def recognize(entry, blocks, D):
                                                        and (s.target.name, s.target.depth) in read))]
     return found
 
-
 def find_prep(h, blocks, D, names, depth):
     """Predecessor blocks of h (outside the loop) that assign the pseudo prep values."""
     preps = []
@@ -66,11 +45,9 @@ def find_prep(h, blocks, D, names, depth):
             preps.append((pb, vals))
     return preps
 
-
 def _pure_moves(pre, D):
     return all(isinstance(s, D.Assign) and isinstance(s.target, (Reg, Pseudo))
                and isinstance(s.value, (Const, Reg, Pseudo)) for s in pre)
-
 
 def _moves_to_latches(h, pb, pre, blocks):
     """Register moves at the loop head (before the iterator call / counter
@@ -89,21 +66,17 @@ def _moves_to_latches(h, pb, pre, blocks):
         lb.succ = [nb.id if x == h.id else x for x in lb.succ]
     _recompute(blocks)
 
-
 def try_numeric(h, blocks, D):
     if h.kind != "cond" or not h.stmts:
         return False
-    # register resets Luraph puts before the counter step (`r2 = nil`)
+
     pre = h.stmts[:-1]
     s = h.stmts[-1]
     if not (isinstance(s, D.Assign) and is_pseudo(s.target) and isinstance(s.value, Bin) and s.value.op == "Add"
             and is_pseudo(s.value.a, s.target.name, s.target.depth) and is_pseudo(s.value.b)):
         return False
     if not _pure_moves(pre, D):
-        # a loop whose body never comes back (it always returns): no back
-        # edge, so the prep and the header are one straight-line block. It
-        # runs at most once: plain ifs on the prep values, not a `for` (the
-        # structurer copies a latch-less for loop without end)
+
         return _run_once_for(h, s, blocks, D)
     a, z = s.target, s.value.b
     d = a.depth
@@ -141,8 +114,7 @@ def try_numeric(h, blocks, D):
     start = vals[a.name]
     step = strip_plus0(vals[z.name])
     limit = strip_plus0(vals[lim.name])
-    # start - Z  ->  start (LPH_JIT loops compute start - step before the
-    # push: the step's expression, or both folded to constants)
+
     if isinstance(start, Bin) and start.op == "Sub" and (is_pseudo(start.b, z.name, d) or
                                                         _same(start.b, step)):
         start = start.a
@@ -170,7 +142,6 @@ def try_numeric(h, blocks, D):
         _moves_to_latches(h, pb, pre, blocks)
         pb.stmts += [copy.copy(x) for x in pre]
     return True
-
 
 def _run_once_for(h, s, blocks, D):
     """try_numeric's header with the prep in the same block: substitute the
@@ -202,7 +173,7 @@ def _run_once_for(h, s, blocks, D):
                 if isinstance(st, D.Assign):
                     st.value = codegen.map_expr(st.value, fn)
     def const_of(x):
-        # a register the block set to a constant (`r9 = 182`) before the prep
+
         if isinstance(x, Reg):
             for st in reversed(h.stmts):
                 if isinstance(st, D.Assign) and isinstance(st.target, Reg) and st.target.n == x.n:
@@ -211,36 +182,30 @@ def _run_once_for(h, s, blocks, D):
     cmp = blocks[h.succ[0]].cond
     lim, step, first = const_of(getattr(cmp, "b", None)), const_of(step), const_of(start.a)
     if all(isinstance(x, Const) and _num(x.v) for x in (first, step, lim)):
-        # constant bounds: whether it runs is known (`for i = 1, 182`)
+
         side = blocks[h.succ[0] if step.v <= 0 else h.succ[1]]
         runs = first.v >= lim.v if step.v <= 0 else first.v <= lim.v
         h.kind, h.cond, h.succ = "goto", None, [side.succ[0] if runs else side.succ[1]]
         _recompute(blocks)
     return False
 
-
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
-
 
 def _same(a, b):
     import ir
     return ir.fmt_expr(a) == ir.fmt_expr(b)
-
 
 def strip_plus0(e):
     if isinstance(e, Bin) and e.op == "Add" and isinstance(e.b, Const) and e.b.v == 0:
         return e.a
     return e
 
-
 def try_generic(h, blocks, D):
     if h.kind != "cond" or not h.stmts or not isinstance(h.stmts[-1], D.CallStmt):
         return False
     call = h.stmts[-1]
-    # register moves before the iterator call (Luraph resets registers there)
-    # run before every call: equivalently once before the loop and at the end
-    # of every iteration that continues (the latches), as long as they are pure
+
     pre = h.stmts[:-1]
     if not _pure_moves(pre, D):
         return False
@@ -260,7 +225,7 @@ def try_generic(h, blocks, D):
             rest.append(s)
     if not vars_:
         return False
-    # the rest of the body must not use the temp any more
+
     preps = []
     for p in h.preds:
         pb = blocks[p]
@@ -279,9 +244,9 @@ def try_generic(h, blocks, D):
         return False
     pb, ps = preps[0]
     args = ps.value.args
-    items = list(args.items[1:]) if args is not None else []   # drop the VM object
+    items = list(args.items[1:]) if args is not None else []   
     if pre:
-        # the iterator expressions are evaluated before the moves (loop prep first)
+
         written = {s.target.n for s in pre if isinstance(s.target, Reg)}
         if any(isinstance(x, Reg) and x.n in written for e in (args.items if args else []) for x in _walk(e)):
             return False
@@ -293,7 +258,7 @@ def try_generic(h, blocks, D):
     h.cond = None
     if args is not None and args.tail is not None:
         import codegen
-        items.append(codegen.TailRef(args.tail))      # for k, v in pairs(t): f, s, ctl from a call
+        items.append(codegen.TailRef(args.tail))      
     lst = LoopExprs(items)
     h.values = (vars_, lst)
     place_prep(pb, lst, D, lambda s: s is ps)
@@ -301,7 +266,6 @@ def try_generic(h, blocks, D):
         import copy
         pb.stmts += [copy.copy(s) for s in pre]
     return True
-
 
 def _walk(e):
     st = [e]
@@ -311,13 +275,11 @@ def _walk(e):
         if hasattr(x, "__dict__"):
             st += [v for v in x.__dict__.values() if hasattr(v, "__dict__") and not isinstance(v, type)]
 
-
 class LoopExprs(list):
     """The expressions of a for header (start, limit, step / the iterator
     triple). They are evaluated once, before the loop: the prep block holds a
     ForPrep statement that owns them (uses, renaming, inlining), the header
     keeps this same list for rendering."""
-
 
 def place_prep(pb, lst, D, is_prep):
     """Put ForPrep(lst) in the prep block after its last loop-prep statement."""
@@ -326,7 +288,6 @@ def place_prep(pb, lst, D, is_prep):
         if is_prep(s):
             at = i
     pb.stmts.insert(len(pb.stmts) if at is None else at + 1, D.ForPrep(lst))
-
 
 def join_preps(h, blocks, pbs, is_prep):
     """Several predecessors of loop header h end with the same prep
@@ -360,7 +321,6 @@ def join_preps(h, blocks, pbs, is_prep):
         pb.succ = [nb.id]
     _recompute(blocks)
     return nb
-
 
 def _recompute(blocks):
     for b in blocks.values():

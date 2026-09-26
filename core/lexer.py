@@ -1,4 +1,3 @@
-"""Minimal Luau lexer + pretty printer used for inspecting Luraph output."""
 import re
 
 KEYWORDS = {"and","break","do","else","elseif","end","false","for","function","if","in",
@@ -8,7 +7,6 @@ _num = re.compile(r"0[xX][0-9a-fA-F_]+|0[bB][01_]+|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_
 _name = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 _ops = ["...", "..=", "==", "~=", "<=", ">=", "//=", "//", "..", "::", "->", "+=", "-=", "*=", "/=", "%=", "^=",
         "+", "-", "*", "/", "%", "^", "#", "<", ">", "=", "(", ")", "{", "}", "[", "]", ";", ":", ",", ".", "&", "|", "?"]
-
 
 def tokenize(src):
     """Yield (kind, text) tuples. kind in name/kw/num/str/op/comment."""
@@ -69,12 +67,11 @@ def tokenize(src):
             raise SyntaxError("bad char %r at %d" % (c, i))
     return out
 
-
 def pretty(tokens, max_str=120):
     """Re-indent a token stream into readable Luau (one statement per line)."""
     lines, cur, depth = [], [], 0
     paren = 0
-    func_stack = []      # paren depth at which a function's parameter list closes
+    func_stack = []      
     want_func = False
 
     def flush():
@@ -121,7 +118,6 @@ def pretty(tokens, max_str=120):
         prev, prev_kind = t, kind
     flush()
     return "\n".join(lines)
-
 
 if __name__ == "__main__":
     import sys

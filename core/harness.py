@@ -1,14 +1,3 @@
-"""
-Runs a script in the fake Roblox/executor environment (envlog.luau) and
-returns what it did. Shared by every obfuscator plugin.
-
-The harness is one Luau file: a few locals (the script, the config, recorded
-Path2D answers, instrumented loadstring'd chunks, data tables) followed by
-envlog.luau. It runs in the real Luau VM (bin/luau.exe), in a long-lived
-REPL process (HarnessServer), or in Roblox Studio (StudioBridge, --studio).
-Its stdout holds the rendered trace between \\0ENVLOG-BEGIN and
-\\0ENVLOG-END, plus machine-readable lines (`\\0NAME ...`).
-"""
 import http.server
 import os
 import queue
@@ -24,7 +13,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "..", "bin") if os.path.exists(os.path.join(HERE, "..", "bin")) else os.path.join(HERE, "bin")
 RUNTIME_DIR = os.path.join(HERE, "..", "runtime") if os.path.exists(os.path.join(HERE, "..", "runtime")) else HERE
 LUAU_URL = "https://github.com/luau-lang/luau/releases/latest/download/luau-windows.zip"
-
 
 def find_luau():
     exe = "luau.exe" if os.name == "nt" else "luau"
@@ -50,20 +38,17 @@ def find_luau():
     os.remove(zpath)
     return local
 
-
 def luau_ast():
     """Path of luau-ast (prints a file's AST as JSON; decode it as latin-1)."""
     return os.path.join(BIN, "luau-ast.exe" if os.name == "nt" else "luau-ast")
-
 
 def long_string(s):
     level = 0
     while ("]" + "=" * level + "]") in s:
         level += 1
     eq = "=" * level
-    # a leading newline inside a long bracket is dropped, so add one of our own
-    return "[" + eq + "[\n" + s + "]" + eq + "]"
 
+    return "[" + eq + "[\n" + s + "]" + eq + "]"
 
 def lua_value(v):
     if isinstance(v, bool):
@@ -74,16 +59,14 @@ def lua_value(v):
         return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r") + '"'
     return str(v)
 
-
 def parse_cfg_value(v):
     """A `--cfg KEY=VALUE` value: true/false/int/string, `@file:PATH` reads a file."""
     if v.startswith("@file:"):
-        # long values (e.g. force_req / force_buf) from a file
+
         with open(v[6:], encoding="utf-8") as f:
             v = f.read().strip()
     return True if v in ("", "true") else False if v == "false" else \
         int(v) if re.fullmatch(r"-?\d+", v) else v
-
 
 def base_cfg(args):
     """The runtime config (envlog.luau CFG) from the shared command line options."""
@@ -92,7 +75,6 @@ def base_cfg(args):
         cfg["input_text"] = args.input_text
     return cfg
 
-
 def user_cfg(args, cfg):
     """--cfg KEY=VALUE options on top of cfg (they win over plugin defaults)."""
     for kv in args.cfg:
@@ -100,16 +82,10 @@ def user_cfg(args, cfg):
         cfg[k] = parse_cfg_value(v)
     return cfg
 
-
-# --------------------------------------------------------------------------
-# Path2D answers (engine float bits some obfuscators key stages with)
-
 P2D_CACHE = {}
-
 
 def p2d_cache_path(input_path):
     return re.sub(r"(\.luau?|\.txt)?$", ".path2d", input_path, count=1)
-
 
 def load_p2d_cache(input_path, studio=False):
     """Path2D answers recorded by an earlier --studio run of this script."""
@@ -123,7 +99,6 @@ def load_p2d_cache(input_path, studio=False):
         if not studio:
             print("[*] replaying %d recorded Path2D results from %s" % (len(P2D_CACHE), cache_path), file=sys.stderr)
     return cache_path
-
 
 def take_p2d(body, cache_path, studio):
     """Strip the \\0P2D lines of a run; engine answers from Studio go to the cache file."""
@@ -140,7 +115,6 @@ def take_p2d(body, cache_path, studio):
             f.write("".join("%s\t%s\n" % kv for kv in P2D_CACHE.items()))
     return body
 
-
 def p2d_miss(body, cache_path):
     if "\x00P2DMISS" not in body:
         return body
@@ -149,15 +123,11 @@ def p2d_miss(body, cache_path):
           file=sys.stderr)
     return body.replace("\x00P2DMISS\n", "")
 
-
-# --------------------------------------------------------------------------
-# building and running a harness
-
 def build_harness(source, cfg, chunks=None):
     with open(os.path.join(RUNTIME_DIR, "envlog.luau"), encoding="utf-8") as f:
         runtime = f.read()
     cfg_lua = "{" + ", ".join("%s = %s" % (k, lua_value(v)) for k, v in cfg.items()) + "}"
-    # --!nocheck must stay the first line of the runtime, so strip it
+
     runtime = runtime.replace("--!nocheck", "", 1)
     with open(os.path.join(RUNTIME_DIR, "unicode_data.luau"), encoding="ascii") as f:
         udata = f.read()
@@ -173,9 +143,8 @@ def build_harness(source, cfg, chunks=None):
                                            for k, v in (chunks or {}).items()) + "}\n"
             "local __UNICODE = (function()\n" + udata + "\nend)()\n"
             "local __ROBLOX = (function()\n" + rdata + "\nend)()\n"
-            # offline datatype models; no new top-level local (the chunk is at Luau's limit)
-            "__ROBLOX.datatypes = (function()\n" + dtypes + "\nend)()\n" + runtime)
 
+            "__ROBLOX.datatypes = (function()\n" + dtypes + "\nend)()\n" + runtime)
 
 def chunk_key(src):
     """Same key as srcKey() in envlog.luau."""
@@ -183,7 +152,6 @@ def chunk_key(src):
     for b in src.encode("latin-1"):
         h = (h * 31 + b) % 2147483648
     return "%d_%d" % (len(src), h)
-
 
 def take_chunks(body):
     """[(key, source)] of the big loadstring'd chunks a run reported (\\0CHUNK),
@@ -193,13 +161,10 @@ def take_chunks(body):
     body = re.sub(r"\x00CHUNK \S+\n[0-9a-f]*\n", "", body)
     return [(k, bytes.fromhex(hx).decode("latin-1")) for k, hx in found], body
 
+LAST_RAW = [""]     
 
-LAST_RAW = [""]     # complete runtime output of the last run (--raw)
-
-
-HEARTBEAT = 2       # seconds between the runtime's heartbeats (envlog checkBudget)
-STALL = 20          # no output for this long: stuck in pure script code (an endless loop)
-
+HEARTBEAT = 2       
+STALL = 20          
 
 def _communicate(cmd, timeout, stall):
     """subprocess.run(capture_output=True) that also gives up when the process
@@ -235,7 +200,6 @@ def _communicate(cmd, timeout, stall):
             t.join(5)
     return b"".join(parts[1]), b"".join(parts[2])
 
-
 def run_once(luau, source, cfg, hpath, timeout, keep, chunks=None):
     cfg = dict(cfg, heartbeat=HEARTBEAT) if "heartbeat" not in cfg else cfg
     with open(hpath, "w", encoding="latin-1", newline="\n") as f:
@@ -252,20 +216,17 @@ def run_once(luau, source, cfg, hpath, timeout, keep, chunks=None):
     m = re.search(r"\x00ENVLOG-BEGIN\n(.*?)\x00ENVLOG-END", stdout, re.S)
     if not m:
         return None, stdout[-3000:] + "\n" + errb.decode("utf-8", "replace")[-3000:]
-    # errors raised inside the runtime name the (temporary) harness file: drop
-    # "<harness path>:<line>: " (literal: a regex would crawl the PROTOS line)
+
     body = m.group(1)
     for hp in {hpath, hpath.replace("\\", "/")}:
         if hp + ":" in body:
             body = re.sub(re.escape(hp) + r":\d+: ", "", body)
     return body, None
 
-
 def save_raw(path):
     if path:
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(LAST_RAW[0])
-
 
 class HarnessServer:
     """One harness process kept alive for many dumps: the script runs once,
@@ -289,13 +250,11 @@ class HarnessServer:
         self.buf = b""
         self.eof = False
         self.nreq = 0
-        # replies are read synchronously (a reader thread handing chunks to
-        # the waiting thread costs ~12 ms per round trip under PyPy, i.e. most
-        # of the live-request time); a watchdog thread enforces the deadline
+
         self.deadline = None
         self.timed_out = False
         threading.Thread(target=self._watchdog, daemon=True).start()
-        # the run starts from its own statement, not inside require() (C call depth)
+
         self._send(b'__S = require("./harness")\n__S("", "", "start")\n')
 
     def _watchdog(self):
@@ -312,7 +271,7 @@ class HarnessServer:
             self.proc.stdin.write(line)
             self.proc.stdin.flush()
         except OSError:
-            pass    # the process died: the reply wait reports it
+            pass    
 
     def reply(self, timeout):
         """The next response (the text between ENVLOG-BEGIN and ENVLOG-END), or
@@ -344,7 +303,7 @@ class HarnessServer:
     def request(self, cfg, timeout, mode="dump"):
         req, buf = cfg.get("force_req") or "", cfg.get("force_buf") or ""
         if len(req) + len(buf) < 2000 and re.fullmatch(r"[\w,@.;=+/:*\-]*", req + buf):
-            # small (live requests): inline, no request file
+
             self._send(('__S("%s", "%s", "%s")\n' % (req, buf, mode)).encode())
             return self.reply(timeout)
         self.nreq += 1
@@ -373,7 +332,6 @@ class HarnessServer:
         import shutil
         shutil.rmtree(self.dir, ignore_errors=True)
 
-
 def trace_text(body):
     """The shape of a run's trace, to tell whether two runs behaved the same:
     no machine-readable lines, and string/number literals masked (scripts
@@ -381,13 +339,11 @@ def trace_text(body):
     changes what runs, not just literals)."""
     body = re.sub(r"\x00CHUNK \S+\n[0-9a-f]*\n", "", body)
     body = re.sub(r"\x00(PROTOS|FORCE|P2D|TRIGGER)[^\n]*\n?", "", body)
-    # error positions and tracebacks name the harness file, whose path differs
-    # (run_once drops "<harness>:line: " prefixes; a served harness keeps them)
+
     body = re.sub(r"(?<=[ \t])(?=\S)(?:[A-Za-z]:)?[^:\n]*?\.luau:", "harness:", body)
     body = re.sub(r"harness:\d+: ", "", body)
     body = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', body)
     return re.sub(r"\d+(?:\.\d+)?(?:e[-+]?\d+)?", "0", body)
-
 
 def same_trace(a, b):
     """trace_text(a) == trace_text(b), ignoring words only one of the two
@@ -399,24 +355,18 @@ def same_trace(a, b):
         return True
     wa, wb = set(re.findall(r"\w+", a)), set(re.findall(r"\w+", b))
     only = (wa ^ wb)
-    mask = lambda t: re.sub(r"\w+", lambda m: "_" if m.group(0) in only else m.group(0), t)  # noqa: E731
+    mask = lambda t: re.sub(r"\w+", lambda m: "_" if m.group(0) in only else m.group(0), t)  
     ma, mb = mask(a), mask(b)
     if ma == mb:
         return True
-    # pairs() over proxy keys (hub.lua: players) runs in address order, which
-    # differs between processes: the same statements in another order, the
-    # trace's local names numbered in that order
+
     decl = r"\blocal\s+([\w ,]+)|\bfor\s+([\w ,]+)\bin\b|\bfunction\s*\w*\s*\(([\w ,.]*)\)"
     names = set()
     for m in re.finditer(decl, a + "\n" + b):
         names.update(re.findall(r"\w+", "".join(g or "" for g in m.groups())))
-    anon = lambda t: sorted(re.sub(r"\w+", lambda m: "_" if m.group(0) in names else m.group(0), t)  # noqa: E731
+    anon = lambda t: sorted(re.sub(r"\w+", lambda m: "_" if m.group(0) in names else m.group(0), t)  
                             .splitlines())
     return anon(ma) == anon(mb)
-
-
-# --------------------------------------------------------------------------
-# Roblox Studio (--studio)
 
 STUDIO_LOADER = r"""-- deobf Studio loader: run in the Studio command bar (Edit mode).
 -- Fetches each harness from deob.py, runs it natively and posts the trace back.
@@ -447,7 +397,6 @@ end)
 HS.HttpEnabled = was
 return ok0 and "deobf: done" or ("deobf loader error: " .. tostring(err0))
 """
-
 
 class StudioBridge:
     """Local HTTP endpoint the Studio loader talks to. GET /harness blocks until
@@ -498,8 +447,7 @@ class StudioBridge:
 
     def finish(self):
         self.jobs.put(b"")
-        time.sleep(1)  # let the loader pick up the stop signal
-
+        time.sleep(1)  
 
 def run_once_studio(bridge, source, cfg, timeout, chunks=None):
     out = bridge.run(build_harness(source, dict(cfg, native=True), chunks), timeout)
@@ -513,7 +461,6 @@ def run_once_studio(bridge, source, cfg, timeout, chunks=None):
     if not m:
         return None, out[-3000:]
     return m.group(1), None
-
 
 class Runner:
     """Runs harnesses for one job: offline with luau.exe, or in Studio with

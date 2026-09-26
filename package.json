@@ -1,0 +1,17 @@
+{
+  "name": "luraphv15-node",
+  "version": "1.0.0",
+  "description": "Luraph v15 deobfuscator - Node.js port",
+  "main": "deob.js",
+  "bin": {
+    "deob": "./deob.js"
+  },
+  "scripts": {
+    "start": "node deob.js",
+    "test": "node deob.js samples/001_vm_like_dispatch-obfuscated.lua"
+  },
+  "keywords": ["luraph", "deobfuscator", "roblox", "luau"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}

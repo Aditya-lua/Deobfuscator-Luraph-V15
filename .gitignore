@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary & intermediate files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Deobfuscator output directory
+output/*
+!output/.gitkeep

@@ -183,3 +183,6 @@ For in-depth explanations of the reverse-engineering methodology, SCCP symbolic 
 ## License
 
 This project is open-source under the [MIT License](LICENSE).
+
+## Credits
+Thanks to **ccjvwsod** on Discord

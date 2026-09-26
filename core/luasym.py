@@ -422,6 +422,8 @@ for _n in BIT32:
     CONCRETE["bit32." + _n] = _bit(_n)
 CONCRETE.update(_buf_fns())
 
+_SCOPE_MISSING = object()
+
 class Scope:
     """Local variables keyed by declaration location (luau-ast)."""
     __slots__ = ("vars", "parent")
@@ -437,6 +439,15 @@ class Scope:
                 return s
             s = s.parent
         return None
+
+    def get(self, key, default=_SCOPE_MISSING):
+        s = self
+        while s is not None:
+            v = s.vars.get(key, _SCOPE_MISSING)
+            if v is not _SCOPE_MISSING:
+                return v
+            s = s.parent
+        return default
 
 class Interp:
     """Evaluates AST nodes. Hooks for the VM-specific parts:
@@ -486,10 +497,10 @@ class Interp:
         sp = self.L.special.get(key)
         if sp is not None:
             return self.L.special_get(sp, self)
-        s = scope.lookup(key)
-        if s is None:
+        v = scope.get(key, _SCOPE_MISSING)
+        if v is _SCOPE_MISSING:
             raise Unsupported("unbound local %s@%s" % (local["name"], key))
-        return s.vars[key]
+        return v
 
     def setvar(self, scope, local, v):
         key = local["location"]
@@ -514,21 +525,47 @@ class Interp:
         if t == "AstStatBlock":
             self.exec_block(st["body"], Scope(scope))
         elif t == "AstStatLocal":
-            vals = self.eval_list(st["values"], scope, len(st["vars"]))
-            for v, x in zip(st["vars"], vals):
-                scope.vars[v["location"]] = x
-                sp = self.L.special.get(v["location"])
+            vars_ = st["vars"]
+            if len(vars_) == 1:
+                v = vars_[0]
+                loc = v["location"]
+                vals_ast = st["values"]
+                if len(vals_ast) == 1 and vals_ast[0]["type"] not in ("AstExprCall", "AstExprVarargs"):
+                    x = self.eval(vals_ast[0], scope)
+                elif vals_ast:
+                    x = self.eval_list(vals_ast, scope, 1)[0]
+                else:
+                    x = None
+                scope.vars[loc] = x
+                sp = self.L.special.get(loc)
                 if sp is not None and sp[0] == "reg":
-
                     self.L.special_set(sp, x, self)
+            else:
+                vals = self.eval_list(st["values"], scope, len(vars_))
+                for v, x in zip(vars_, vals):
+                    scope.vars[v["location"]] = x
+                    sp = self.L.special.get(v["location"])
+                    if sp is not None and sp[0] == "reg":
+                        self.L.special_set(sp, x, self)
         elif t == "AstStatAssign":
-
-            targets = [self.lvalue(v, scope) for v in st["vars"]]
-            vals = self.eval_list(st["values"], scope, len(targets))
-            if len(targets) > 1 and hasattr(self.L, "parallel_values"):
-                vals = self.L.parallel_values(targets, vals, self)
-            for tg, x in zip(targets, vals):
-                self.assign(tg, x, scope)
+            vars_ = st["vars"]
+            if len(vars_) == 1:
+                vals_ast = st["values"]
+                if len(vals_ast) == 1 and vals_ast[0]["type"] not in ("AstExprCall", "AstExprVarargs"):
+                    tg = self.lvalue(vars_[0], scope)
+                    x = self.eval(vals_ast[0], scope)
+                    self.assign(tg, x, scope)
+                else:
+                    tg = self.lvalue(vars_[0], scope)
+                    x = self.eval_list(vals_ast, scope, 1)[0]
+                    self.assign(tg, x, scope)
+            else:
+                targets = [self.lvalue(v, scope) for v in vars_]
+                vals = self.eval_list(st["values"], scope, len(targets))
+                if hasattr(self.L, "parallel_values"):
+                    vals = self.L.parallel_values(targets, vals, self)
+                for tg, x in zip(targets, vals):
+                    self.assign(tg, x, scope)
         elif t == "AstStatCompoundAssign":
             tg = self.lvalue(st["var"], scope)
             cur = self.read_lvalue(tg, scope)

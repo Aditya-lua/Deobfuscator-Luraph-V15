@@ -1355,6 +1355,11 @@ class Renderer:
             if s.startswith("-") and prec > 8:
                 return "(" + s + ")"
             return s
+        if isinstance(e, (int, float, bool, bytes)):
+            s = self.const(e)
+            if s.startswith("-") and prec > 8:
+                return "(" + s + ")"
+            return s
         if isinstance(e, Reg):
             return self.reg(e.n)
         if isinstance(e, LocalName):

@@ -31,13 +31,16 @@ def text_of(lines, node):
     return "\n".join(parts)
 
 def walk(node, fn):
-    if isinstance(node, dict):
-        fn(node)
-        for v in node.values():
-            walk(v, fn)
-    elif isinstance(node, list):
-        for v in node:
-            walk(v, fn)
+    stack = [node]
+    pop = stack.pop
+    extend = stack.extend
+    while stack:
+        curr = pop()
+        if isinstance(curr, dict):
+            fn(curr)
+            extend(curr.values())
+        elif isinstance(curr, list):
+            extend(curr)
 
 def local_name(expr):
     if expr.get("type") == "AstExprLocal":
@@ -298,25 +301,24 @@ def decl_key(local):
     """Identity of a local: its declaration location."""
     return local["location"]
 
-def maker_info(root):
-    """closure_makers() plus what the runtime capture needs: for each maker,
-    {"at": (line, col), "var": closure local, "proto": proto param name,
-     "maker": maker AstExprFunction, "vm": the VM closure AstExprFunction,
-     "captures": [maker-level local names the VM closure uses]}.
-    Only names that are not shadowed at the insertion point are returned."""
-    disp_nodes = [d["node"] for d in find_dispatchers(root)]
+def maker_info(root, disp=None):
+    disp_nodes = {id(d["node"]) for d in (disp if disp is not None else find_dispatchers(root))}
     out = {}
 
-    def walk(n, stack, stmts):
+    def walk_tree(n, stack, stmts):
         if isinstance(n, dict):
             t = n.get("type")
+            pushed_stack = False
+            pushed_stmt = False
             if t == "AstExprFunction":
-                stack = stack + [n]
-            if t and t.startswith("AstStat"):
-                stmts = stmts + [(n, len(stack))]
-            if t == "AstStatWhile" and any(n is d for d in disp_nodes):
-                oi = max(i for i, f in enumerate(stack) if len(f["args"]) >= 2)
-                if oi + 1 < len(stack):
+                stack.append(n)
+                pushed_stack = True
+            elif t and t.startswith("AstStat"):
+                stmts.append((n, len(stack)))
+                pushed_stmt = True
+            if t == "AstStatWhile" and id(n) in disp_nodes:
+                oi = max((i for i, f in enumerate(stack) if len(f["args"]) >= 2), default=-1)
+                if oi != -1 and oi + 1 < len(stack):
                     clo = stack[oi + 1]
                     st = [s for s, d in stmts if d == oi + 1]
                     st = st[-1] if st else None
@@ -333,11 +335,15 @@ def maker_info(root):
                                                      "pf_key": stack[oi]["args"][pi]["name"],
                                                      "maker": stack[oi], "vm": clo, "stmt": st}
             for v in n.values():
-                walk(v, stack, stmts)
+                walk_tree(v, stack, stmts)
+            if pushed_stack:
+                stack.pop()
+            if pushed_stmt:
+                stmts.pop()
         elif isinstance(n, list):
             for v in n:
-                walk(v, stack, stmts)
-    walk(root, [], [])
+                walk_tree(v, stack, stmts)
+    walk_tree(root, [], [])
     for info in out.values():
         info["captures"] = _captures(info)
     return list(out.values())
@@ -390,8 +396,9 @@ def _maker_params(maker):
     return pi, ui
 
 def _decls_in(fn):
-    """Declaration keys of locals declared directly in fn (params and body,
-    not inside nested functions)."""
+    cache = fn.get("_decls")
+    if cache is not None:
+        return cache
     keys = {}
 
     def visit(n):
@@ -417,6 +424,7 @@ def _decls_in(fn):
     for a in fn["args"]:
         keys[decl_key(a)] = a["name"]
     visit(fn["body"])
+    fn["_decls"] = keys
     return keys
 
 def _captures(info):

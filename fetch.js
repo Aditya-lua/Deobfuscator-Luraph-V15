@@ -85,6 +85,63 @@ function extractChainedUrls(code) {
   return urls;
 }
 
+function postBody(url, body, contentType = 'text/plain') {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const payload = Buffer.from(body, 'utf8');
+    const req = client.request(url, {
+      method: 'POST',
+      headers: {
+        'User-Agent': USER_AGENTS[0],
+        'Content-Type': contentType,
+        'Content-Length': payload.length,
+        'Connection': 'close',
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({
+        statusCode: res.statusCode,
+        body: Buffer.concat(chunks).toString('latin1'),
+      }));
+    });
+    req.on('error', reject);
+    req.setTimeout(20000, () => {
+      req.destroy();
+      reject(new Error(`Timeout posting ${url}`));
+    });
+    req.end(payload);
+  });
+}
+
+async function fetchJnkieChain(loaderCode) {
+  const deliveryUrl = loaderCode.match(/https:\/\/api\.jnkie\.com\/api\/v1\/luascripts\/delivery\/[^\s"']+/);
+  if (!deliveryUrl) return null;
+  const keyVar = loaderCode.match(/getgenv\(\)\.SCRIPT_KEY\s+or\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  const key = keyVar ? (process.env[keyVar[1]] || process.env.JNKIE_KEY || '') : (process.env.JNKIE_KEY || '');
+  console.log(`[*] JNKIE delivery chain detected (key var: ${keyVar ? keyVar[1] : 'none'}, key ${key ? 'provided' : 'empty'})`);
+  const res = await postBody(deliveryUrl[0], key);
+  console.log(`[*] Delivery API status: ${res.statusCode}`);
+  if (res.statusCode !== 200) {
+    console.error(`[!] Delivery denied: ${res.body.slice(0, 200)}`);
+    process.exit(1);
+  }
+  const body = res.body.trim();
+  if (!body.startsWith('https://cdn.jnkie.com/')) {
+    console.error('[!] Unexpected delivery response');
+    process.exit(1);
+  }
+  console.log(`[*] Following CDN payload: ${body}`);
+  const payload = await fetchBypass(body);
+  if (payload.statusCode !== 200 || payload.body.length < 100) {
+    console.error(`[!] CDN fetch failed (status ${payload.statusCode})`);
+    process.exit(1);
+  }
+  console.log(`[+] Luraph payload received: ${payload.body.length} bytes`);
+  return payload.body;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   let targetUrl = null;
@@ -114,28 +171,17 @@ async function main() {
   console.log(`[+] Received ${res.body.length} bytes (Content-Type: ${res.contentType})`);
 
   let finalScript = res.body;
-  const stageUrls = extractChainedUrls(res.body);
 
-  if (stageUrls.length > 0) {
-    console.log(`[*] Detected ${stageUrls.length} secondary URL(s) in loader:`);
-    for (const u of stageUrls) {
-      console.log(`    -> ${u}`);
-    }
-
-    const nextStage = stageUrls.find(u => u.includes('cdn.luarmor.net') || u.includes('raw.githubusercontent') || u.includes('pastebin.com/raw'));
-    if (nextStage) {
-      console.log(`[*] Automatically fetching next stage payload: ${nextStage}`);
-      const nextRes = await fetchBypass(nextStage);
-      if (nextRes.statusCode === 200 && nextRes.body.length > 100) {
-        console.log(`[+] Stage 2 payload received: ${nextRes.body.length} bytes`);
-        const stage2Path = outputPath
-          ? outputPath.replace(/\.lua$/, '') + '_stage2.lua'
-          : path.join(__dirname, 'output', 'stage2_payload.lua');
-        fs.mkdirSync(path.dirname(stage2Path), { recursive: true });
-        fs.writeFileSync(stage2Path, nextRes.body, 'latin1');
-        console.log(`[+] Stage 2 saved to: ${stage2Path}`);
-      }
-    }
+  const jnkiePayload = await fetchJnkieChain(res.body);
+  if (jnkiePayload) {
+    finalScript = jnkiePayload;
+    const payloadPath = outputPath
+      ? outputPath.replace(/\.lua$/, '_payload.lua')
+      : path.join(__dirname, 'output', 'jnkie_payload.lua');
+    fs.mkdirSync(path.dirname(payloadPath), { recursive: true });
+    fs.writeFileSync(payloadPath, finalScript, 'latin1');
+    console.log(`[+] Payload saved to: ${payloadPath}`);
+    outputPath = payloadPath;
   }
 
   if (!outputPath) {

@@ -635,7 +635,7 @@ class State:
 
 WALK_MAX_ERRORS = 100    
 WALK_RESTARTS = 64       
-WALK_LIMIT = int(os.environ.get("DEVIRT_WALK_LIMIT", 35000))       
+WALK_LIMIT = int(os.environ.get("DEVIRT_WALK_LIMIT", 250000))       
 
 MAX_STACK_DEPTHS = 8     
 STACK_WALK_MAX = 30000   
@@ -2757,6 +2757,8 @@ class Program:
         hubs = set()        
         steps = 0
         nerr = 0
+        unique_seen = 0
+        plateau = 0
         while work and len(order) < limit:
             k = work.pop()
             inwork.discard(k)
@@ -2783,6 +2785,15 @@ class Program:
                     return s0, order, True
                 nodes[k] = node
                 order.append((k, node))
+                if len(order) % 5000 == 0:
+                    seen_now = len(set((kk[0], kk[1]) for kk, _ in order))
+                    if seen_now == unique_seen:
+                        plateau += 5000
+                        if plateau >= 25000:
+                            break
+                    else:
+                        unique_seen = seen_now
+                        plateau = 0
                 if lf.walk_only and nerr > WALK_MAX_ERRORS:
 
                     break

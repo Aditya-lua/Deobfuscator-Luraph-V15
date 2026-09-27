@@ -531,29 +531,35 @@ class VMModel:
         return cap.get(self.maker["args"][0]["name"])
 
 def find_ctor_funcs(root):
-    """Functions in the top-level `setmetatable({...})` table constructor: key -> AstExprFunction."""
-    best = None
-    for n in iter_nodes(root):
-        if n.get("type") == "AstExprTable":
-            fns = sum(1 for it in n["items"] if it["value"]["type"] == "AstExprFunction")
-            if best is None or fns > best[0]:
-                best = (fns, n)
+    """Functions in every `setmetatable({...})`-style table constructor:
+    key -> AstExprFunction. Luraph can ship several ctor tables (one per VM
+    family); every function in any of them can be bound to an OpaqueFn, so
+    keys from all tables merge (int keys of later tables offset by their
+    position to avoid collisions)."""
     out = {}
-    if best:
+    tables = []
+    for n in iter_nodes(root):
+        if n.get("type") != "AstExprTable":
+            continue
+        fns = sum(1 for it in n["items"] if it["value"]["type"] == "AstExprFunction")
+        if fns:
+            tables.append((fns, n))
+    tables.sort(key=lambda t: -t[0])
+    for rank, (_, table) in enumerate(tables):
         pos = 0
-        for it in best[1]["items"]:
+        for it in table["items"]:
             if it["kind"] == "item":
-                pos += 1        
+                pos += 1
             if it["value"]["type"] != "AstExprFunction":
                 continue
             if it["kind"] == "item":
-                out[pos] = it["value"]
+                out.setdefault(pos if rank == 0 else 100000 * (rank + 1) + pos, it["value"])
             elif it["kind"] == "record":
-                out[it["key"]["value"].encode("latin-1")] = it["value"]
+                out.setdefault(it["key"]["value"].encode("latin-1"), it["value"])
             elif it["kind"] == "general" and it["key"]["type"] == "AstExprConstantNumber":
-                out[S.fix_int(it["key"]["value"])] = it["value"]
+                out.setdefault(S.fix_int(it["key"]["value"]), it["value"])
             elif it["kind"] == "general" and it["key"]["type"] == "AstExprConstantString":
-                out[it["key"]["value"].encode("latin-1")] = it["value"]
+                out.setdefault(it["key"]["value"].encode("latin-1"), it["value"])
     return out
 
 class VMCrash(Unsupported):
@@ -961,6 +967,14 @@ class ProtoLifter:
         if isinstance(v, OpaqueFn) and v.pf_tid is not None and v.node is None:
             n = self.dump.shared.setdefault(v.lfid, len(self.dump.shared) + 1)
             return SharedFn(v, n)
+        if isinstance(v, OpaqueFn):
+            if v.node is not None:
+                clo = self.plain_closure(LuaFunc(v.node, Scope()))
+                if clo is not None:
+                    return clo
+                return Opaque("function", self.plain_function_text(v.node) or "function(...) end")
+            n = self.dump.shared.setdefault(v.lfid, len(self.dump.shared) + 1)
+            return SharedFn(v, n)
         if isinstance(v, Buf):
 
             t = self.new_temp()
@@ -1062,7 +1076,7 @@ class ProtoLifter:
         """A trivial function Luraph compiles to plain Lua instead of bytecode
         (Script42: a closure op whose maker is `function() return function()
         return {} end end`): its source text, if it reads no outer locals."""
-        node = fn.node
+        node = fn.node if not isinstance(fn, dict) else fn
         lines = getattr(self.vm, "src_lines", None)
         if not isinstance(node, dict) or node.get("type") != "AstExprFunction" or not lines:
             return None
@@ -2699,6 +2713,8 @@ class Program:
             if isinstance(e, LTable):
                 for k, v in e.h.items():
                     if isinstance(v, OpaqueFn) and v.node is None and k in ctor:
+                        v.node = ctor[k]
+                    elif isinstance(v, OpaqueFn) and v.node is None and isinstance(k, int) and k in ctor:
                         v.node = ctor[k]
         g = LTable()
         for lib in ("bit32", "string", "table", "math", "buffer"):

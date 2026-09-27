@@ -392,16 +392,19 @@ class PlainProto:
         return text
 
 def iter_nodes(n):
-    """Every dict node under n, pre-order (iterative: the AST is deep)."""
     stack = [n]
-    pop, push = stack.pop, stack.extend
+    pop = stack.pop
     while stack:
-        n = pop()
-        if type(n) is dict:
-            yield n
-            push(reversed([v for v in n.values() if type(v) is dict or type(v) is list]))
-        elif type(n) is list:
-            push(reversed(n))
+        curr = pop()
+        if type(curr) is dict:
+            yield curr
+            for v in reversed(curr.values()):
+                t = type(v)
+                if t is dict or t is list:
+                    stack.append(v)
+        elif type(curr) is list:
+            for v in reversed(curr):
+                stack.append(v)
 
 class VMModel:
     def __init__(self, info, dispatch_nodes, ctor_funcs):
@@ -448,58 +451,59 @@ class VMModel:
         self.kstack_link = None
 
         alias = {}
-        for n in iter_nodes(self.inner):
-            if n.get("type") in ("AstStatAssign", "AstStatLocal"):
-                for var, val in zip(n["vars"], n["values"]):
-                    loc = var["location"] if n["type"] == "AstStatLocal" else \
-                        var["local"]["location"] if var["type"] == "AstExprLocal" else None
-                    if loc and val["type"] == "AstExprLocal":
-                        alias.setdefault(loc, set()).add(val["local"]["location"])
-        for n in iter_nodes(self.inner):
-            if n.get("type") != "AstStatAssign":
-                continue
-            for var, val in zip(n["vars"], n["values"]):
-                if var["type"] != "AstExprLocal" or val["type"] != "AstExprTable":
-                    continue
-                me = var["local"]["location"]
-                if me not in vm_decls:
-                    continue
-                link = None
-                saved = []
-                for it in val["items"]:
-                    v = it["value"]
-                    if v["type"] == "AstExprLocal" and it["kind"] == "general" and \
-                            (v["local"]["location"] == me or alias.get(v["local"]["location"]) == {me}):
-                        link = it["key"]["value"]
-                    elif v["type"] == "AstExprLocal":
-                        saved.append(v["local"])
-                if link is not None:
-                    self.kstack_key = me
-                    self.kstack_link = S.fix_int(link)
-                    for loc in saved:
-                        self.special[loc["location"]] = ("pseudo", loc["name"])
-
-        iterated = set()        
-        for n in iter_nodes(self.inner):
-            if n.get("type") == "AstStatForIn" and len(n["values"]) >= 2 and \
-                    n["values"][1]["type"] == "AstExprLocal":
-                iterated.add(n["values"][1]["local"]["location"])
-        for n in iter_nodes(self.inner):
-            if n.get("type") != "AstStatLocal":
-                continue
-            for var, val in zip(n["vars"], n["values"]):
-                if val["type"] == "AstExprLocal" and val["local"]["location"] in vm_decls \
-                        and val["local"]["location"] not in self.special \
-                        and var["location"] in iterated:
-                    self.special[val["local"]["location"]] = "sink"
-
+        iterated = set()
         cleared = set()
+        table_assigns = []
+        local_copies = []
+
         for n in iter_nodes(self.inner):
-            if n.get("type") == "AstStatAssign":
-                for var, val in zip(n["vars"], n["values"]):
-                    if var["type"] == "AstExprIndexExpr" and var["expr"]["type"] == "AstExprLocal" \
-                            and val["type"] == "AstExprConstantNil":
-                        cleared.add(var["expr"]["local"]["location"])
+            t = n.get("type")
+            if t == "AstStatAssign":
+                vars_, vals_ = n["vars"], n["values"]
+                for var, val in zip(vars_, vals_):
+                    vt = var["type"]
+                    if vt == "AstExprLocal":
+                        vloc = var["local"]["location"]
+                        valt = val["type"]
+                        if valt == "AstExprLocal":
+                            alias.setdefault(vloc, set()).add(val["local"]["location"])
+                        elif valt == "AstExprTable" and vloc in vm_decls:
+                            table_assigns.append((vloc, val["items"]))
+                    elif vt == "AstExprIndexExpr":
+                        if var["expr"]["type"] == "AstExprLocal" and val["type"] == "AstExprConstantNil":
+                            cleared.add(var["expr"]["local"]["location"])
+            elif t == "AstStatLocal":
+                vars_, vals_ = n["vars"], n["values"]
+                for var, val in zip(vars_, vals_):
+                    if val["type"] == "AstExprLocal":
+                        alias.setdefault(var["location"], set()).add(val["local"]["location"])
+                        if val["local"]["location"] in vm_decls:
+                            local_copies.append((var["location"], val["local"]["location"]))
+            elif t == "AstStatForIn":
+                vals_ = n["values"]
+                if len(vals_) >= 2 and vals_[1]["type"] == "AstExprLocal":
+                    iterated.add(vals_[1]["local"]["location"])
+
+        for me, items in table_assigns:
+            link = None
+            saved = []
+            for it in items:
+                v = it["value"]
+                if v["type"] == "AstExprLocal" and it["kind"] == "general" and \
+                        (v["local"]["location"] == me or alias.get(v["local"]["location"]) == {me}):
+                    link = it["key"]["value"]
+                elif v["type"] == "AstExprLocal":
+                    saved.append(v["local"])
+            if link is not None:
+                self.kstack_key = me
+                self.kstack_link = S.fix_int(link)
+                for loc in saved:
+                    self.special[loc["location"]] = ("pseudo", loc["name"])
+
+        for var_loc, val_loc in local_copies:
+            if val_loc not in self.special and var_loc in iterated:
+                self.special[val_loc] = "sink"
+
         for loc in iterated & cleared:
             if loc in vm_decls and loc not in self.special:
                 self.special[loc] = "sink"
@@ -2325,6 +2329,9 @@ def _jit_nested_model(node):
     return _JIT_NESTED[id(node)][1]
 
 def _declared_in(node):
+    cache = node.get("_decl_in")
+    if cache is not None:
+        return cache
     out = {a["location"] for a in node.get("args", [])}
     for n in iter_nodes(node):
         t = n.get("type")
@@ -2336,6 +2343,7 @@ def _declared_in(node):
             out.add(n["name"]["location"])
         elif t == "AstExprFunction":
             out |= {a["location"] for a in n["args"]}
+    node["_decl_in"] = out
     return out
 
 def _jit_live_in(w, pc_decl, cands):
@@ -2640,9 +2648,9 @@ def analyze_source(path):
     disp = vmmap.find_dispatchers(root)
     ctor = find_ctor_funcs(root)
     vms = {}
-    for info in vmmap.maker_info(root):
-
-        ids = {id(n) for n in iter_nodes(info["vm"])}
+    for info in vmmap.maker_info(root, disp):
+        vm_node = info["vm"]
+        ids = {id(n) for n in iter_nodes(vm_node)}
         inside = [d["node"] for d in disp if id(d["node"]) in ids]
         tag = "%s@%d,%d" % ((key,) + tuple(info["at"]))
         vms[tag] = VMModel(info, inside, ctor)

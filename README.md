@@ -147,7 +147,7 @@ The engine has been heavily optimized (symbolic AST caching, iterative tree walk
 
 All benchmark outputs pass `luau-ast` syntax validation (`COMPILE OK`). The previously failing `9eccab05cff67267.lua` (non-empty VM table in a register) now produces 10,769 lines of clean, named Luau source.
 
-**Reproduce it yourself** — every file in the table above ships in [`sample/`](sample/), so you can verify the numbers on your own machine:
+**Reproduce it yourself** — every input in the table above ships in [`sample/`](sample/) and the expected deobfuscated result for each one is committed in [`sample/output/`](sample/output), so you can verify both the timings and the output quality on your own machine:
 
 ```bash
 node deob.js "sample/Blox Fruit.lua" -o "output/Blox Fruit.lua"

@@ -145,7 +145,16 @@ The engine has been heavily optimized (symbolic AST caching, iterative tree walk
 | `9eccab05cff67267.lua` | 222 KB | 36 | *crashed* | **4m 02s** | fixed |
 | `5ae248d6527b5c01.lua` | 170 KB | 1 | 3.7s | **3.7s** | — |
 
-All benchmark outputs pass `luau-ast` syntax validation (`COMPILE OK`). The previously failing `9eccab05cff67267.lua` (non-empty VM table in a register) now produces 10,769 lines of clean, named Luau source.
+Additional stress tests on fresh scripts (run once with the current build, no baseline):
+
+| Stress Test | Size | Functions | Time | Result |
+|---|---|---|---|---|
+| `StealAnEgg.lua` | **1.62 MB** | 1,723 | **12m 21s** | 32,435 lines (1.8 MB) |
+| `Steal-a-Brainrot.lua` | **1.07 MB** | 1,138 | **6m 59s** | 19,407 lines (463 KB) |
+| `JumpForAnimals.lua` | 503 KB | 457 | **1m 38s** | 7,217 lines (160 KB) |
+| `RideAPet.lua` | 397 KB | 328 | **55s** | 5,170 lines (113 KB) |
+
+Every input and its reference deobfuscated output is committed in `sample/` and `sample/output/`. All outputs pass `luau-ast` syntax validation (`COMPILE OK`). `StealAnEgg.lua` lifts 99.97% of its 1,723 functions; the remaining 46 blocks (0.03%) are guarded with an explicit `error("devirt: unexplored successor ...")` marker instead of silently emitting wrong code.
 
 **Reproduce it yourself** — every input in the table above ships in [`sample/`](sample/) and the expected deobfuscated result for each one is committed in [`sample/output/`](sample/output), so you can verify both the timings and the output quality on your own machine:
 

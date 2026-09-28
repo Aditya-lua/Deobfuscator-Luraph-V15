@@ -388,3 +388,54 @@ understood and beaten, and the whole chain is automated in
 
 Unit tests: `test/luarmor_fetch_test.py` (stub/blob/init parsing, input
 building, response classification, handshake extraction).
+
+## 15. The superflow source opens: maker-params fix, b stability, and the two-phase protocol
+
+Session of Sep 28 (continued). Three results, two blockers mapped precisely.
+
+### The op-77/mode-239 walker barrier is broken
+
+`_maker_params` (core/obfuscators/luraph_v15/vmmap.py) inferred the closure
+maker's proto parameter by self-index patterns (`P[P[k]]`) on the parameter
+itself. The sephal VM's factories read the proto through *alias locals*
+(`local Y = r` / `local d,K,... = r`, then `Y[Y[10]]...`), so the heuristic
+found nothing and fell back to param 1; the real layout of all four factories
+is `function(L,o,o,o,r,...)` — proto at index 4, upvalue list at 3 (the
+mode-239 closure op calls `L[W[W[1]]](L, nil, nil, j, W)`). The fix resolves
+direct param aliases and, when no direct self-index count exists, selects the
+proto param from alias-resolved counts. Effect on the primed sephal input:
+devirt walks 15 functions (was 2) and lifts **9,333 lines** of the superflow
+bootstrap — env-check constants (`fa6607`), the FileSystem/canary checks and
+their error strings, the request-building logic. Remaining gaps: 14 unlifted
+blocks (`symbolic next pc/mode`, `unexplored successor`) where nested-function
+protos read shared buffers the runtime deserializer materializes lazily; those
+need the force-decode path extended to non-lazy (metatable-less) tables.
+
+### b is process-stable; the handshake is accepted live
+
+With `CFG.time_pin` set, the 103-hex signature b is **byte-identical across
+repeated runs inside one luau process** (serve mode, 3 starts -> 6 identical
+captures) while varying per process. The per-process nonce therefore comes
+from state fixed at process init (allocation addresses survived full env/cwd/
+argv pinning: two separate runs with identical env, cwd and argv still differ
+in the last 6 chars). Consequence: a b built in-process can be replayed live
+from the driver, and the server accepts it (fresh loader; rotation still
+~50 min).
+
+### The two-phase protocol and the tamper snapshot
+
+`tools/luarmor_two_phase.py` runs: serve process -> phase 1 (build handshake,
+capture b) -> live replay (classify) -> inject the session response as a
+canned http_map into the SAME process (new serve "http" mode, JSON payload,
+wildcard keys) -> phase 2 (same process recomputes the identical b, hits the
+canned answer, decrypts in-sandbox). Phase 2 still ends in State848: the
+bootstrap's anti-tamper restores its own snapshot of the harness config state
+during the run — every injected field (CFG.http_map, CHAIN fields, proxy
+upvalue stores behind them) reads back nil by request time, while fields
+present in phase 1 (CFG.readfile_map, time_pin) survive. A write-traceback
+watchdog on the injected map never fires: the wipe is not an assignment
+through the table. Next wave, two candidate paths: (a) extend the lift to the
+nested protos (force-decode for metatable-less tables) and read the response
+cipher + nonce derivation statically out of the recovered source; (b) run the
+phase-2 handshake through a channel the tamper whitelists (the readfile_map
+survives — e.g. serve the response through a fake cache-file read).

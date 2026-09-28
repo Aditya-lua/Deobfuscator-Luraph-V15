@@ -5074,6 +5074,7 @@ if R.rawget(E, "__TR") then
 end
 if TRIGGER then R.print(MARK .. "TRIGGER " .. TRIGGER) end
 for _, line in R.ipairs(P2D_LOG) do R.print(MARK .. "P2D " .. line) end
+if CFG.call_log then CHAIN.dumpCallLog() end
 if P2D_MISS then R.print(MARK .. "P2DMISS") end
 for _, hook in R.ipairs(CHAIN.endHooks or {}) do
         local ok, text = R.pcall(hook)
@@ -5124,6 +5125,37 @@ end
 if CFG.serve then
         SERVE_PAD = R.rep(" ", 16384)
         CHAIN.serve = function(req, buf, mode)
+                if mode == "http" then
+                        -- merge a canned http_map into CFG at runtime (serve
+                        -- sessions). req: JSON {"<METHOD URL>": {"status": n,
+                        -- "body": "..."}} or {"<METHOD URL>": "<body>"}.
+                        -- NOTE: the sephal bootstrap's anti-tamper restores its
+                        -- own snapshot of the harness config mid-run and nils
+                        -- foreign fields, so maps injected here do not reach
+                        -- the auth request of a later "start"; kept for
+                        -- experiments and for scripts without env hardening.
+                        local ok2, decoded = R.pcall(function()
+                                local m = {}
+                                for k, v in R.next, R.json.decode(req) or {} do
+                                        m[k] = (R.type(v) == "table" and v)
+                                                or { status = 200, body = R.tostring(v) }
+                                end
+                                return m
+                        end)
+                        if ok2 then
+                                CFG.http_map = decoded
+                        end
+                        R.print(MARK .. "HTTPMAP " .. R.tostring(ok2) .. " keys="
+                                .. (function()
+                                        local n = 0
+                                        if ok2 then
+                                                for _ in R.next, decoded do n += 1 end
+                                        end
+                                        return n
+                                end)())
+                        R.print(SERVE_PAD)
+                        return
+                end
                 if mode == "start" then
                         -- the run itself, from a REPL statement of its own: inside require()
                         -- (a C function) the script would start a few C calls deeper than

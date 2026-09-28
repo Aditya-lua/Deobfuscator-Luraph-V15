@@ -185,3 +185,33 @@ with a `loadstring55.txt` signature canary.
 - Full constant recovery would require a live authed session inside an
   executor; out of scope for a static toolchain by design (and out of scope of
   this project's goals).
+
+## 11. Bootstrap chain (v4 loader stub, observed)
+
+The public paste entry (`api.luarmor.net/files/v4/loaders/<md5>.lua`) is a
+5-line, **unobfuscated** stub:
+
+1. Sets global `_bsdata0` — 12 mixed entries: 8 numeric IDs (incl. 32-bit-ish
+   values like `3117095690`, `1790607955`), two 39-byte raw binary blobs, and
+   two ASCII-hex blobs (69 and 203 bytes decoded). No code, no plaintext —
+   signing/key material consumed by the next stage.
+2. Disk-cache check: `readfile("static_content_170926/init-<module>.lua")`
+   (module id here: `f07dbcbe19a-sephal`); used if `#a > 2000`.
+3. Otherwise `game:HttpGet("https://cdn.luarmor.net/v4_init_sephal.lua" ..
+   (_ca920af6193 or ""))`, caches it, runs `loadstring(a)(<module-id>)`.
+
+`_ca920af6193` is an optional suffix global (version pin set by hub wrappers).
+**CDN gate**: fetching the init URL without the right suffix (or from a
+non-executor client) returns a 327-byte trap that kicks
+("Your executor is not supported…"). UA spoofing and arbitrary query suffixes
+do NOT pass the gate (tested: synapse/ScriptWare/Krnl/Roblox UAs, `?v=`,
+`?c=`, etc. — all 327 bytes). The real init is served per-executor-build.
+
+Consequence for the chain: the real "sephal" init (stage 2, which defines
+`ce_like_loadstring_fn` and `luraph_runtime1`) is best obtained from an
+executor's disk cache (`static_content_170926/init-*.lua` in the executor
+workspace) rather than the CDN. Once obtained, §6's "not in sample" caveat
+about `luraph_runtime1` can be closed.
+
+No key is required at any point of the *bootstrap*; keys only matter at the
+client's `/auth/init` (§5), which requires a live executor session regardless.

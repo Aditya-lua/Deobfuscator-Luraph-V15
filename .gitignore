@@ -16,3 +16,5 @@ Thumbs.db
 # Deobfuscator output directory
 output/*
 !output/.gitkeep
+work/
+flowauth_crack/work/*

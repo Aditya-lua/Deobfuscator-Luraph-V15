@@ -49,6 +49,14 @@ elif cmd == "pipeline":
     runner = harness.Runner(job)
     runner.luau = c["luau_exe"]
 
+    profiler = None
+    prof_path = os.environ.get("DEOB_PROFILE")
+    if prof_path:
+        import cProfile
+        profiler = cProfile.Profile()
+
+    if profiler:
+        profiler.enable()
     driver.lift(
         job,
         runner,
@@ -60,6 +68,10 @@ elif cmd == "pipeline":
         c["dpath"],
         c.get("chunk_paths", []),
     )
+    if profiler:
+        profiler.disable()
+        profiler.dump_stats(prof_path)
+        sys.stderr.write("[*] cProfile stats written to %s\n" % prof_path)
     runner.finish()
 
     dpath = c["dpath"]

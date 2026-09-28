@@ -252,8 +252,17 @@ def thread_empty(entry, blocks):
             b.stmts += s.stmts
             b.kind, b.cond, b.succ, b.values, b.error = s.kind, s.cond, s.succ, s.values, s.error
             del blocks[s.id]
-            recompute_preds(blocks)
+            # s vanished: b now feeds s's successors directly. Update their
+            # preds in place instead of a full O(V+E) recompute per merge
+            # (this loop used to be O(merges x blocks)).
+            for x in b.succ:
+                if x in blocks:
+                    ps = blocks[x].preds
+                    for pi, p in enumerate(ps):
+                        if p == s.id:
+                            ps[pi] = b.id
             changed = True
+    recompute_preds(blocks)
     return entry
 
 def reachable(entry, blocks):

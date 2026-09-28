@@ -524,10 +524,14 @@ class Interp:
         sp = self.L.special.get(key)
         if sp is not None:
             return self.L.special_get(sp, self)
-        v = scope.get(key, _SCOPE_MISSING)
-        if v is _SCOPE_MISSING:
-            raise Unsupported("unbound local %s@%s" % (local["name"], key))
-        return v
+        # Scope.get inlined: one call frame less on every variable read
+        s = scope
+        while s is not None:
+            v = s.vars.get(key, _SCOPE_MISSING)
+            if v is not _SCOPE_MISSING:
+                return v
+            s = s.parent
+        raise Unsupported("unbound local %s@%s" % (local["name"], key))
 
     def setvar(self, scope, local, v):
         key = local["location"]
@@ -772,70 +776,88 @@ class Interp:
         return Multi([self.eval(node, scope)])
 
     def eval(self, node, scope):
-        t = node["type"]
-        if t == "AstExprConstantNumber":
-            v = node.get("_v")
-            if v is None:
-                v = fix_int(node["value"])
-                node["_v"] = v
-            return v
-        if t == "AstExprConstantString":
-            v = node.get("_v")
-            if v is None:
-                v = node["value"].encode("latin-1")
-                node["_v"] = v
-            return v
-        if t == "AstExprConstantBool":
-            return node["value"]
-        if t == "AstExprConstantNil":
-            return None
-        if t == "AstExprLocal":
-            return self.getvar(scope, node["local"])
-        if t == "AstExprGlobal":
-            return self.L.global_value(node["global"])
-        if t == "AstExprGroup":
-            return self.eval(node["expr"], scope)
-        if t == "AstExprIndexExpr":
-            obj = self.eval(node["expr"], scope)
-            if obj is None:
-                raise Unsupported("index nil @%s" % node["location"])
-            return self.index(obj, self.eval(node["index"], scope))
-        if t == "AstExprIndexName":
-            obj = self.eval(node["expr"], scope)
-            if obj is None:
-                raise Unsupported("index nil @%s" % node["location"])
-            idx = node.get("_idx")
-            if idx is None:
-                idx = node["index"].encode("latin-1")
-                node["_idx"] = idx
-            return self.index(obj, idx)
-        if t == "AstExprCall":
-            r = self.eval_call(node, scope)
-            return r.first() if isinstance(r, Multi) else r
-        if t == "AstExprVarargs":
-            return self.L.varargs(scope).first()
-        if t == "AstExprBinary":
-            op = node["op"]
+        f = _EVAL_DISPATCH.get(node["type"])
+        if f is None:
+            raise Unsupported("expression " + node["type"])
+        return f(self, node, scope)
 
-            if op == "And":
-                a = self.eval(node["left"], scope)
-                return self.eval(node["right"], scope) if self.cond_true(a) else a
-            if op == "Or":
-                a = self.eval(node["left"], scope)
-                return a if self.cond_true(a) else self.eval(node["right"], scope)
-            return self.binop(op, self.eval(node["left"], scope), self.eval(node["right"], scope))
-        if t == "AstExprUnary":
-            return self.unop(node["op"], self.eval(node["expr"], scope))
-        if t == "AstExprIfElse":
-            c = self.eval(node["condition"], scope)
-            return self.eval(node["trueExpr"] if self.cond_true(c) else node["falseExpr"], scope)
-        if t == "AstExprTable":
-            return self.table_ctor(node, scope)
-        if t == "AstExprFunction":
-            return LuaFunc(node, scope)
-        if t == "AstExprTypeAssertion":
-            return self.eval(node["expr"], scope)
-        raise Unsupported("expression " + t)
+    def _ev_num(self, node, scope):
+        v = node.get("_v")
+        if v is None:
+            v = fix_int(node["value"])
+            node["_v"] = v
+        return v
+
+    def _ev_str(self, node, scope):
+        v = node.get("_v")
+        if v is None:
+            v = node["value"].encode("latin-1")
+            node["_v"] = v
+        return v
+
+    def _ev_bool(self, node, scope):
+        return node["value"]
+
+    def _ev_nil(self, node, scope):
+        return None
+
+    def _ev_local(self, node, scope):
+        return self.getvar(scope, node["local"])
+
+    def _ev_global(self, node, scope):
+        return self.L.global_value(node["global"])
+
+    def _ev_group(self, node, scope):
+        return self.eval(node["expr"], scope)
+
+    def _ev_indexexpr(self, node, scope):
+        obj = self.eval(node["expr"], scope)
+        if obj is None:
+            raise Unsupported("index nil @%s" % node["location"])
+        return self.index(obj, self.eval(node["index"], scope))
+
+    def _ev_indexname(self, node, scope):
+        obj = self.eval(node["expr"], scope)
+        if obj is None:
+            raise Unsupported("index nil @%s" % node["location"])
+        idx = node.get("_idx")
+        if idx is None:
+            idx = node["index"].encode("latin-1")
+            node["_idx"] = idx
+        return self.index(obj, idx)
+
+    def _ev_call(self, node, scope):
+        r = self.eval_call(node, scope)
+        return r.first() if isinstance(r, Multi) else r
+
+    def _ev_varargs(self, node, scope):
+        return self.L.varargs(scope).first()
+
+    def _ev_binary(self, node, scope):
+        op = node["op"]
+        if op == "And":
+            a = self.eval(node["left"], scope)
+            return self.eval(node["right"], scope) if self.cond_true(a) else a
+        if op == "Or":
+            a = self.eval(node["left"], scope)
+            return a if self.cond_true(a) else self.eval(node["right"], scope)
+        return self.binop(op, self.eval(node["left"], scope), self.eval(node["right"], scope))
+
+    def _ev_unary(self, node, scope):
+        return self.unop(node["op"], self.eval(node["expr"], scope))
+
+    def _ev_ifelse(self, node, scope):
+        c = self.eval(node["condition"], scope)
+        return self.eval(node["trueExpr"] if self.cond_true(c) else node["falseExpr"], scope)
+
+    def _ev_table(self, node, scope):
+        return self.table_ctor(node, scope)
+
+    def _ev_func(self, node, scope):
+        return LuaFunc(node, scope)
+
+    def _ev_typeassert(self, node, scope):
+        return self.eval(node["expr"], scope)
 
     def table_ctor(self, node, scope):
         items = node["items"]
@@ -955,6 +977,28 @@ class Interp:
         except ReturnSig as r:
             return r.values
         return Multi([])
+
+# expression-type dispatch (eval used to be a 15-branch string if-chain; it
+# is one of the hottest functions of the whole pipeline)
+_EVAL_DISPATCH = {
+    "AstExprConstantNumber": Interp._ev_num,
+    "AstExprConstantString": Interp._ev_str,
+    "AstExprConstantBool": Interp._ev_bool,
+    "AstExprConstantNil": Interp._ev_nil,
+    "AstExprLocal": Interp._ev_local,
+    "AstExprGlobal": Interp._ev_global,
+    "AstExprGroup": Interp._ev_group,
+    "AstExprIndexExpr": Interp._ev_indexexpr,
+    "AstExprIndexName": Interp._ev_indexname,
+    "AstExprCall": Interp._ev_call,
+    "AstExprVarargs": Interp._ev_varargs,
+    "AstExprBinary": Interp._ev_binary,
+    "AstExprUnary": Interp._ev_unary,
+    "AstExprIfElse": Interp._ev_ifelse,
+    "AstExprTable": Interp._ev_table,
+    "AstExprFunction": Interp._ev_func,
+    "AstExprTypeAssertion": Interp._ev_typeassert,
+}
 
 def lua_eq(a, b):
     if isinstance(a, bool) or isinstance(b, bool):

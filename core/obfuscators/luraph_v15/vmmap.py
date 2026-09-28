@@ -263,14 +263,46 @@ def _maker_params(maker):
     function(g, d, d, d, d, j) where the proto is the last one. The proto is
     the parameter indexed through itself (P[P[k]]: its fields are keyed by
     its own entries); the upvalue list is the first other parameter the body
-    uses (only the last of repeated names is visible)."""
+    uses (only the last of repeated names is visible).
+
+    Some makers read the proto through an alias local (`local Y = r` or
+    `local d,K,... = r`, then `Y[Y[10]]`), so the self-index pattern never
+    names the parameter directly. Those aliases are resolved and, when no
+    direct self-index count exists, their counts select the proto param
+    (sephal x==223 factory: `local Y=r; Y[Y[10]]...` -> proto at index 4)."""
     args = maker["args"]
     visible = {}
     for i, a in enumerate(args):
         visible[a["name"]] = i
     counts = {}
-    kcounts = {}    
+    kcounts = {}
+    acounts = {}
     used = set()
+
+    param_locs = {a["location"] for a in args}
+    aliases = {}
+
+    def collect_aliases(n):
+        if isinstance(n, dict):
+            if n.get("type") == "AstStatLocal":
+                for var, val in zip(n["vars"], n["values"]):
+                    if var.get("type") == "AstLocal" and val.get("type") == "AstExprLocal":
+                        src = val["local"]["location"]
+                        if src in param_locs or src in aliases:
+                            aliases[var["location"]] = src
+            for v in n.values():
+                collect_aliases(v)
+        elif isinstance(n, list):
+            for v in n:
+                collect_aliases(v)
+
+    collect_aliases(maker["body"])
+
+    def resolve(loc, depth=0):
+        while depth < 10 and loc not in param_locs and loc in aliases:
+            loc = aliases[loc]
+            depth += 1
+        return loc
 
     def visit(n):
         if isinstance(n, dict):
@@ -282,6 +314,9 @@ def _maker_params(maker):
                     and n["index"]["expr"]["local"]["location"] == n["expr"]["local"]["location"]:
                 k = n["expr"]["local"]["location"]
                 counts[k] = counts.get(k, 0) + 1
+                ak = resolve(k)
+                if ak is not k:
+                    acounts[ak] = acounts.get(ak, 0) + 1
             if n.get("type") == "AstExprIndexExpr" and n["expr"].get("type") == "AstExprLocal" \
                     and n["index"].get("type") == "AstExprConstantNumber":
                 k = n["expr"]["local"]["location"]
@@ -295,11 +330,18 @@ def _maker_params(maker):
     cands = [i for i in visible.values() if i > 0]
     pi = max(cands, key=lambda i: (counts.get(args[i]["location"], 0), i == 1)) if cands else 1
     if not counts.get(args[pi]["location"]):
-        pi = 1
-
+        # blind fallback: alias-resolved self-index counts first (a maker whose
+        # proto is only read through `local Y = <param>`), then const-indexed
+        # params, then param 1
+        aliased = [(acounts.get(args[i]["location"], 0), i) for i in cands]
+        best = max(aliased) if aliased else None
         kc = [i for i in cands if kcounts.get(args[i]["location"])]
-        if kc:
-            pi = max(kc, key=lambda i: kcounts[args[i]["location"]])
+        if best and best[0] > 0:
+            pi = best[1]
+        else:
+            pi = 1
+            if kc:
+                pi = max(kc, key=lambda i: kcounts[args[i]["location"]])
     others = sorted(i for i in visible.values() if i not in (0, pi) and args[i]["location"] in used)
     ui = others[0] if others else pi + 1
     return pi, ui

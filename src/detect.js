@@ -2,6 +2,13 @@
 
 const LURAPH_HEADER = /This file was protected using Luraph Obfuscator v(\d+)(?:\.(\d+))?/;
 const LURAPH_VM_SHAPE = /\[\d+\]=(bit32|buffer|string|table|math)\.\w+/;
+// v15 chunks primed by loader stubs (Luarmor etc.) start with loader lines
+// (script_key/_bsdata0/blob tables); the VM chunk starts later with
+// `return setmetatable({` — usually at a line start, sometimes directly
+// after the stub's closing long-bracket (`]]]]return setmetatable...`).
+// Scan the first 64 KB for that boundary (the VM-shape check below is the
+// real validator).
+const VM_CHUNK_START = /[\s\]]*return setmetatable\(\{/;
 
 function detectLuraph(source) {
   const head500 = source.slice(0, 500);
@@ -9,10 +16,14 @@ function detectLuraph(source) {
   if (m) {
     return m[1] === '15' ? 1.0 : 0.3;
   }
-  const head2k = source.trimStart().slice(0, 2000);
-  if (head2k.startsWith('return setmetatable({') &&
-      (LURAPH_VM_SHAPE.test(head2k) || source.slice(0, 200000).includes('LPH'))) {
-    return 0.8;
+  const head = source.slice(0, 65536);
+  const vm = VM_CHUNK_START.exec(head);
+  if (vm) {
+    const at = vm.index + vm[0].length - 'return setmetatable({'.length;
+    const chunkHead = source.slice(at, at + 2000);
+    if (LURAPH_VM_SHAPE.test(chunkHead) || source.slice(at, at + 200000).includes('LPH')) {
+      return 0.8;
+    }
   }
   return 0.0;
 }

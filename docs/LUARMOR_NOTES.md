@@ -319,3 +319,72 @@ Analysis artifacts: `gdrive_in/Luarmor/stub/` — `loader.lua` (stub),
 (correctly ordered + primed input), `sephal_full.lua` (intermediate),
 `sephal_devirt.lua` (outer devirt), `/tmp/sephal_v5.raw.txt` (final
 behaviour trace incl. the auth request).
+
+## 14. The live chain cracked: loader rotation, session acceptance, and the tool
+
+Session of Sep 28 (continued). The "outdated" tripwire from section 12 is now
+understood and beaten, and the whole chain is automated in
+`tools/luarmor_fetch.py`.
+
+### The loader file rotates; stale blobs are the tripwire
+
+- The v4 loader files (`api.luarmor.net/files/v4/loaders/<md5>.lua`) are
+  **public and ungated** (plain HTTP GET works). They rotate: the same URL
+  fetched twice ~50 minutes apart had different `_bsdata0` content (first
+  entry `339253403` -> `663777057`). The blobs are short-lived signing data.
+- The auth server validates `d`/`b` against the CURRENT rotation. A stale
+  loader's handshake gets the plain-text "This loader code is outdated. You
+  must use the loadstring..." answer; a fresh loader's handshake -- with the
+  sandbox-computed `b` -- is **ACCEPTED**.
+- So `x.luarmor.net` never rejected our sandbox because it is a sandbox: it
+  rejected the stale signing material. The sandbox-built signature is valid.
+
+### The accepted response
+
+- Shape: a JSON array holding one hex string, e.g.
+  `["d8e55380558032852ae6fc64f70e3fe26..."]` (~310 bytes binary). Not plain
+  text, not the tripwire -- the next protocol stage, encrypted.
+- The response is **keyed to a one-time nonce inside `b`**: replaying the
+  exact same URL a second time returns the "outdated" tripwire (nonce
+  burned), and a canned replay into a fresh sandbox run fails in the
+  response decrypt (`sub` on nil) because the sandbox computes a different
+  nonce. `b` is 103 hex chars; the 97-char prefix is fully deterministic
+  under `CFG.time_pin`, the last 6 chars (3 bytes) still vary per process
+  even with clocks, `math.random`, `Random` seeds, wait() timestamps and
+  `collectgarbage`/`gcinfo` pinned, and with ASLR disabled. The remaining
+  nonce source is inside the superflow VM (optrace/dispatch-emulation wave).
+
+### Static devirt status of the sephal chunk
+
+- The full pipeline now runs on the primed input end to end (detection
+  tolerates loader prelude lines before `return setmetatable({`; the
+  node->python bridge passes object-valued CFG; `--cfg-json` feeds
+  readfile_map/http_map). The outer program (byte decoder, `_bsdata0`
+  validation, module-id setup) lifts; the walk stops at the bootstrap
+  closure with `closure of non-proto` (VM mode 239 pc 49076, op 77): that
+  maker call passes the proto through the maker's own upvalue (`self`),
+  not through the argument list, so the walker cannot bind it. The
+  bootstrap logic therefore remains VM-interpreted; its behaviour is fully
+  captured by the trace (GUI, canary, cache probe, handshake, State294/848
+  ladder).
+
+### The tool
+
+`tools/luarmor_fetch.py` runs the chain end to end:
+
+1. fetch/parse the public loader stub (`--loader-url` recommended: the
+   rotation makes saved stubs stale within the hour);
+2. obtain the init (`--init` from an executor cache; the CDN gate still
+   serves the real file only to executor clients -- browsers get an
+   "Unauthorized" page, curl gets the 327-byte executor trap, no-UA
+   requests get a Cloudflare worker error 1101);
+3. build the stub-faithful input and run the sandbox bootstrap;
+4. replay the handshake live and classify the answer
+   (`session-response` / `stale-loader` / `executor-trap`);
+5. canned-replay the response into the sandbox (works once the nonce
+   source is pinned; the limitation is reported, not hidden);
+6. hand any client file to `tools/luarmor_probe.py` for the
+   loader/payload split + IOC scan.
+
+Unit tests: `test/luarmor_fetch_test.py` (stub/blob/init parsing, input
+building, response classification, handshake extraction).

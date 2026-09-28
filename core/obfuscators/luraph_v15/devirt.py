@@ -1603,6 +1603,22 @@ class ProtoLifter:
 
             return Missing(None)
         if not isinstance(proto, LTable):
+            if os.environ.get("DEVIRT_MC_DEBUG"):
+                desc = []
+                dump = self.dump
+                for i, v in enumerate(vals):
+                    extra = ""
+                    if isinstance(v, LTable):
+                        ks = sorted((repr(k)[:20], repr(x)[:24]) for k, x in list(v.h.items())[:24])
+                        pid = dump.pid_of_table.get(v.tid) if v.tid is not None else None
+                        extra = " tid=%r pid=%r keys=%s" % (v.tid, pid, ks)
+                    desc.append("%d=%s:%s%s" % (i, type(v).__name__, repr(v)[:50], extra))
+                print("[mc] non-proto closure pi=%d ui=%d vals[%d]: %s"
+                      % (pi, ui, len(vals), " | ".join(desc)), file=sys.stderr)
+                print("[mc] last_op=%r mode=%r pc=%r misses=%r lazy_tids(paths)=%s"
+                      % (getattr(self, "last_op", None), getattr(self, "cur_mode", None),
+                         getattr(self, "cur_pc", None), dict(dump.misses),
+                         {t: dump.paths().get(t) for t in list(dump.lazy)[:12]}), file=sys.stderr)
             raise Unsupported("closure of non-proto")
         entries = []
         if isinstance(ups, LTable):

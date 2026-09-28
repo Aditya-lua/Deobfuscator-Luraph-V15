@@ -20,9 +20,21 @@ if cmd == "pipeline":
     import harness
 
     class DummyArgs:
+        DEFAULTS = {
+            # --cfg KEY=VALUE list consumed by harness.user_cfg (the node cfg
+            # extras already travel inside c["cfg"], so this stays empty)
+            "cfg": [],
+            "keep_harness": False, "no_hooks": False, "no_devirt": False,
+            "max_runs": 1, "raw": None, "input_text": None, "port": None,
+        }
+
         def __init__(self, d):
             for k, v in d.items():
                 setattr(self, k, v)
+
+        def __getattr__(self, k):
+            # the python driver reads attrs the node CLI never passes
+            return DummyArgs.DEFAULTS.get(k, False)
 
     args = DummyArgs(c["args"])
     job = Job(c["input"], c["source"], args, c["trace_path"], c["debug"], c["obfuscator"])

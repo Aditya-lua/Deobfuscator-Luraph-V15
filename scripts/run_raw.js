@@ -26,6 +26,12 @@ const vmmap = require('../src/vmmap');
     cfg.readfile_map = { [args[2]]: fs.readFileSync(args[3], 'latin1') };
     process.stderr.write(`[*] canned file: ${args[2]} <- ${args[3]}\n`);
   }
+  // optional extra CFG: argv[4] = path to a JSON file merged into cfg
+  // (http_map canned responses, real_json, trace flags, ...)
+  if (args[4]) {
+    Object.assign(cfg, JSON.parse(fs.readFileSync(args[4], 'utf8')));
+    process.stderr.write(`[*] extra cfg: ${args[4]}\n`);
+  }
   fs.writeFileSync(input + ".patched.lua", patched, "latin1");
   const res = await runner.run(patched, cfg, {});
   fs.writeFileSync(out, harness.getLastRaw() || '');

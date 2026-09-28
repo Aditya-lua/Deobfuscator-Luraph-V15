@@ -866,8 +866,16 @@ def state_machine(entry, blocks, name):
             out.append(SError(b.error))
         elif b.kind == "crash":
             out.append(SCrash())
-        else:
+        elif b.kind == "end":
+            # dead path (a decided-away branch or an outcome-less block): the
+            # linear structurer just stops emitting here, which in the state
+            # machine form is an implicit return -- falling through instead
+            # would leave the state variable unchanged and loop forever
             out.append(SReturn(None))
+        else:
+            # a new Block kind must be handled here explicitly; silently
+            # emitting `return` hid the bug and corrupted the output
+            out.append(SError("state machine: unhandled block kind %s" % b.kind))
         cases.append((num[bid], out))
     chain = SBlock()
     for k, out in reversed(cases):

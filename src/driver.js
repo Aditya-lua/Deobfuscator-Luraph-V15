@@ -88,7 +88,7 @@ async function run(job) {
       continue;
     }
 
-    const trig = /\x00TRIGGER (\d+)/.exec(body);
+    const trig = new RegExp(harness.mark('TRIGGER ') + '(\\d+)').exec(body);
     if (trapped !== null && trace.stmtCount(body) < trace.stmtCount(trapped[0])) {
       process.stderr.write(`[*] disabling function #${skip[skip.length - 1]} made script stop earlier: keeping run ${attempt - 1}\n`);
       body = trapped[0];
@@ -109,7 +109,7 @@ async function run(job) {
 
   const runText = harness.traceText(body);
   body = harness.p2dMiss(body, cachePath);
-  body = body.replace(/\x00TRIGGER \d+\n?/g, '');
+  body = body.replace(new RegExp(harness.mark('TRIGGER ') + '\\d+\\n?', 'g'), '');
 
   const [protosJson, b1] = trace.takeLine(body, 'PROTOS');
   body = b1;
@@ -259,7 +259,7 @@ async function liftWithRounds(job, runner, patched, cfg, chunks, runText, ppath,
           process.stderr.write('[!] constant request run failed\n');
           break;
         }
-        const m = /\x00PROTOS ([^\n]*)\n/.exec(runRes.body);
+        const m = new RegExp(harness.mark('PROTOS ') + '([^\\n]*)\\n').exec(runRes.body);
         if (!m || m[1].startsWith('error:')) {
           process.stderr.write('[!] constant request run gave no protos\n');
           break;

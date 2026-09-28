@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
 const https = require('https');
 const http = require('http');
@@ -12,6 +13,12 @@ const LUAU_URL = 'https://github.com/luau-lang/luau/releases/latest/download/lua
 
 const HEARTBEAT = 2;
 const STALL = 20;
+
+// Per-run protocol nonce: buildHarness generates it and prepends `local
+// __MARK` before envlog.luau; every \0 marker the runtime prints carries it.
+// The analyzed script never learns it, so it cannot forge protocol lines.
+let MARK = '';
+function mark(s) { return '\x00' + MARK + s; }
 
 let _luauExe = null;
 function findLuau() {
@@ -112,7 +119,7 @@ function loadP2dCache(inputPath) {
 
 function takeP2d(body) {
   const p2d = [];
-  body = body.replace(/\x00P2D ([^\t\n]+)\t([^\n]*)\n/g, (_, k, v) => {
+  body = body.replace(new RegExp(mark('P2D ') + '([^\\t\\n]+)\\t([^\\n]*)\\n', 'g'), (_, k, v) => {
     p2d.push([k, v]);
     return '';
   });
@@ -122,10 +129,28 @@ function takeP2d(body) {
 }
 
 function p2dMiss(body, cachePath) {
-  if (!body.includes('\x00P2DMISS')) return body;
+  if (!body.includes(mark('P2DMISS'))) return body;
   process.stderr.write(`[!] this script derives keys from a Path2D call the offline model does not cover\n    (run it once with --studio if needed; writes ${cachePath})\n`);
-  return body.replace(/\x00P2DMISS\n/g, '');
+  return body.replace(new RegExp(mark('P2DMISS') + '\\n', 'g'), '');
 }
+
+// The analyzed script can climb the Lua stack with getfenv(2+) from inside any
+// callback the harness calls into (and from the runner coroutine body), so
+// every harness closure it can reach must not carry the real globals: a shield
+// environment (stdlib only, no loadstring/getfenv/setfenv/_G) is set on the
+// function wrapping the runtime below. Sensitive values (__MARK, __SOURCE, ...)
+// are parameters of that wrapper, i.e. upvalues -- getfenv only hands out
+// environment tables, so they stay invisible. The outer chunk's own frames are
+// unreachable: getfenv levels cannot cross the coroutine resume boundary.
+const SHIELD_STDLIB = `{
+        string = string, math = math, table = table, os = os, debug = debug,
+        coroutine = coroutine, bit32 = bit32, buffer = buffer, utf8 = utf8, vector = vector,
+        type = type, typeof = typeof, pairs = pairs, ipairs = ipairs, next = next,
+        select = select, rawget = rawget, rawset = rawset, rawequal = rawequal,
+        rawlen = rawlen, setmetatable = setmetatable, getmetatable = getmetatable,
+        tostring = tostring, tonumber = tonumber, error = error, assert = assert, print = print,
+        pcall = pcall, xpcall = xpcall, unpack = table.unpack, newproxy = newproxy,
+}`;
 
 function buildHarness(source, cfg, chunks = {}) {
   const runtimeFile = path.join(HERE, '..', 'runtime', 'envlog.luau');
@@ -143,15 +168,21 @@ function buildHarness(source, cfg, chunks = {}) {
   const p2dLua = '{' + [...P2D_CACHE.entries()].map(([k, v]) => `[${luaValue(k)}] = ${luaValue(v)},\n`).join('') + '}';
   const chunksLua = '{' + Object.entries(chunks).map(([k, v]) => `[${luaValue(k)}] = ${longString(v)},\n`).join('') + '}';
 
+  MARK = crypto.randomBytes(8).toString('hex');
+
   return (
-    'local __SOURCE = ' + longString(source) + '\n' +
-    'local __CONFIG = ' + cfgLua + '\n' +
-    'local __P2D = ' + p2dLua + '\n' +
-    'local __CHUNKS = ' + chunksLua + '\n' +
+    'local __STDLIB = ' + SHIELD_STDLIB + '\n' +
+    'local __SHIELD = setmetatable({}, { __index = __STDLIB })\n' +
     'local __UNICODE = (function()\n' + udata + '\nend)()\n' +
     'local __ROBLOX = (function()\n' + rdata + '\nend)()\n' +
     '__ROBLOX.datatypes = (function()\n' + dtypes + '\nend)()\n' +
-    runtime
+    'local __RAW = { getfenv = getfenv, setfenv = setfenv, loadstring = loadstring }\n' +
+    'local __RUN = function(__MARK, __SOURCE, __CONFIG, __P2D, __CHUNKS, __UNICODE, __ROBLOX, __RAW)\n' +
+    runtime + '\n' +
+    'end\n' +
+    'setfenv(__RUN, __SHIELD)\n' +
+    'return __RUN(' + luaValue(MARK) + ', ' + longString(source) + ', ' + cfgLua + ',\n' +
+    '  ' + p2dLua + ', ' + chunksLua + ', __UNICODE, __ROBLOX, __RAW)\n'
   );
 }
 
@@ -168,9 +199,9 @@ async function runOnce(luau, source, cfg, hpath, timeoutSec, keepHarness, chunks
     try { fs.unlinkSync(hpath); } catch {}
   }
 
-  let stdout = body.replace(/\x00HB\r?\n {16384}\r?\n/g, '').replace(/\r\n/g, '\n');
+  let stdout = body.replace(new RegExp(mark('HB') + '\\r?\\n {16384}\\r?\\n', 'g'), '').replace(/\r\n/g, '\n');
   LAST_RAW = stdout + err;
-  const m = /\x00ENVLOG-BEGIN\n([\s\S]*?)\x00ENVLOG-END/.exec(stdout);
+  const m = new RegExp(mark('ENVLOG-BEGIN') + '\\n([\\s\\S]*?)' + mark('ENVLOG-END')).exec(stdout);
   if (!m) {
     return { body: null, err: stdout.slice(-3000) + '\n' + err.slice(-3000) };
   }
@@ -219,7 +250,7 @@ function _communicate(cmd, timeoutMs, stallMs) {
 
 function takeChunks(body) {
   const found = [];
-  body = body.replace(/\x00CHUNK (\S+)\n([0-9a-f]*)\n/g, (_, k, hx) => {
+  body = body.replace(new RegExp(mark('CHUNK ') + '(\\S+)\\n([0-9a-f]*)\\n', 'g'), (_, k, hx) => {
     found.push([k, Buffer.from(hx, 'hex').toString('latin1')]);
     return '';
   });
@@ -267,7 +298,7 @@ class HarnessServer {
   }
 
   _readUntilEnd(timeoutMs) {
-    const END = Buffer.from('\x00ENVLOG-END');
+    const END = Buffer.from(mark('ENVLOG-END'));
     return new Promise((resolve) => {
       const accum = [];
       const onData = (chunk) => {
@@ -280,7 +311,7 @@ class HarnessServer {
           clearTimeout(timer);
           const out = all.slice(0, idx + END.length).toString('utf8');
           LAST_RAW = out;
-          const m = /\x00ENVLOG-BEGIN\n([\s\S]*?)\x00ENVLOG-END/.exec(out);
+          const m = new RegExp(mark('ENVLOG-BEGIN') + '\\n([\\s\\S]*?)' + mark('ENVLOG-END')).exec(out);
           if (!m) return resolve({ body: null, err: out.slice(-3000) });
           return resolve({ body: m[1], err: null });
         }
@@ -320,7 +351,7 @@ class HarnessServer {
   async fetch(paths, bufs, timeoutMs) {
     const { body, err } = await this.request({ force_req: paths.join(';'), force_buf: bufs }, timeoutMs, 'fetch');
     if (!body) throw new Error('harness fetch failed: ' + err.slice(-300));
-    const m = /\x00FETCH ([^\n]*)\n/.exec(body);
+    const m = new RegExp(mark('FETCH ') + '([^\\n]*)\\n').exec(body);
     if (!m || m[1].startsWith('error:')) throw new Error('harness fetch failed: ' + (m ? m[1].slice(0, 300) : body.slice(-300)));
     return m[1];
   }
@@ -333,8 +364,8 @@ class HarnessServer {
 }
 
 function traceText(body) {
-  body = body.replace(/\x00CHUNK \S+\n[0-9a-f]*\n/g, '');
-  body = body.replace(/\x00(PROTOS|FORCE|P2D|TRIGGER)[^\n]*\n?/g, '');
+  body = body.replace(/\x00[0-9a-f]{8,32}CHUNK \S+\n[0-9a-f]*\n/g, '');
+  body = body.replace(/\x00[0-9a-f]{8,32}(PROTOS|FORCE|P2D|TRIGGER)[^\n]*\n?/g, '');
   body = body.replace(/(?<=[ \t])(?=\S)(?:[A-Za-z]:)?[^:\n]*?\.luau:/g, 'harness:');
   body = body.replace(/harness:\d+: /g, '');
   body = body.replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
@@ -370,5 +401,7 @@ module.exports = {
   loadP2dCache, p2dCachePath, traceText, sameTrace,
   HarnessServer, Runner,
   getLastRaw: () => LAST_RAW,
+  getMark: () => MARK,
+  mark,
   HEARTBEAT, STALL,
 };

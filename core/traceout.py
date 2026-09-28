@@ -8,15 +8,18 @@ def stmt_count(body):
 
 def take_line(body, name):
     """(value of the first `\\0NAME value` line, body without it); value is None if absent."""
-    m = re.search(r"\x00%s ([^\n]*)\n" % name, body)
+    import harness
+    m = re.search(re.escape(harness.mark(name + " ")) + r"([^\n]*)\n", body)
     if not m:
         return None, body
     return m.group(1), body[:m.start()] + body[m.end():]
 
 def take_strings(body):
     """(body, the strings section of `dump_strings` or None)."""
-    if "\x00ENVLOG-STRINGS" in body:
-        body, strings = body.split("\x00ENVLOG-STRINGS\n", 1)
+    import harness
+    s = harness.mark("ENVLOG-STRINGS\n")
+    if s in body:
+        body, strings = body.split(s, 1)
         return body, strings
     return body, None
 

@@ -128,7 +128,7 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
         if body is None:
             print("[!] constant request run failed: " + err[-500:], file=sys.stderr)
             break
-        m = re.search(r"\x00PROTOS ([^\n]*)\n", body)
+        m = re.search(re.escape(harness.mark("PROTOS ")) + r"([^\n]*)\n", body)
         if not m or m.group(1).startswith("error:"):
             print("[!] constant request run gave no protos", file=sys.stderr)
             break
@@ -136,6 +136,13 @@ def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
             f.write(m.group(1))
     header = job.credit_header()
     prefix = (header + "\n") if header else ""
+    if text is None:
+        # every round failed before the first full lift (the "constant request
+        # run failed" path breaks out with text still None): finish_text(None)
+        # used to crash with a TypeError that hid the real error
+        sys.exit("[!] no devirtualized output was produced: the constant-request run failed "
+                 "before the first full lift (see the error above); re-run with "
+                 "DEVIRT_FULL_ROUNDS=1 to lift the first round without extra constant runs")
     job.write(dpath, prefix + devirt.finish_text(text) + "\n")
 
 def run(job):
@@ -204,7 +211,7 @@ def run(job):
         if added:
             print("[*] script loadstring'd %d new VM chunk(s); instrumenting and re-running" % added, file=sys.stderr)
             continue
-        trig = re.search(r"\x00TRIGGER (\d+)", body)
+        trig = re.search(re.escape(harness.mark("TRIGGER ")) + r"(\d+)", body)
         if trapped is not None and trace.stmt_count(body) < trace.stmt_count(trapped[0]):
 
             print("[*] disabling function #%d made the script stop earlier: it is the script's own "
@@ -228,7 +235,7 @@ def run(job):
     if not devirt_on:
         runner.finish()
     harness.save_raw(args.raw)
-    body = re.sub(r"\x00TRIGGER \d+\n?", "", body)
+    body = re.sub(re.escape(harness.mark("TRIGGER ")) + r"\d+\n?", "", body)
     protos_json, body = trace.take_line(body, "PROTOS")
     force, body = trace.take_line(body, "FORCE")
     if force is not None and devirt_on:

@@ -2620,6 +2620,8 @@ def _jit_forloop(node, lf):
 def make_stepper(vm, lifter):
     return JitStepper(vm, lifter) if isinstance(vm, JitModel) else Stepper(vm, lifter)
 
+_BT_WARNED = [False]
+
 def build_tree(paths, d, start):
     """paths share decisions[:d]; statements before `start` were emitted already."""
     if len(paths) == 1 and len(paths[0][0]) <= d:
@@ -2627,8 +2629,15 @@ def build_tree(paths, d, start):
         return Node(out[start:], outcome=oc)
 
     p0 = paths[0]
-    if len(p0[0]) <= d:
-
+    if len(p0[0]) <= d or len(p0[1]) <= d:
+        # decisions exhausted -- or the decision log is shorter than the
+        # decision list (a re-dispatch edge case): there is no logged branch
+        # position at depth d to split on, so the only sound shape is a leaf
+        # carrying p0's statements.
+        if len(p0[0]) > d and not _BT_WARNED[0]:
+            _BT_WARNED[0] = True
+            print("[!] devirt: decision log shorter than the decision list at depth %d; "
+                  "emitting the prefix as a leaf (one branch may be partial)" % d, file=sys.stderr)
         taken, dlog, out, oc = p0
         return Node(out[start:], outcome=oc)
     _, cond, _ = p0[1][d][1], p0[1][d][2], None
@@ -2706,10 +2715,17 @@ class Program:
 
         for cap in self.dump.protos.values():
             try:
-                e = cap.get(self.vm_of(cap).maker["args"][0]["name"])
+                vm = self.vm_of(cap)
+            except Unsupported:
+                # a proto whose __maker tag has no saved VM source (loadstring'd
+                # chunk that was not written out): skip it instead of aborting
+                # the whole Program construction
+                continue
+            try:
+                e = cap.get(vm.maker["args"][0]["name"])
             except (KeyError, AttributeError, IndexError):
                 continue
-            ctor = self.ctors[id(self.vm_of(cap))]
+            ctor = self.ctors[id(vm)]
             if isinstance(e, LTable):
                 for k, v in e.h.items():
                     if isinstance(v, OpaqueFn) and v.node is None and k in ctor:

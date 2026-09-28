@@ -2,6 +2,7 @@ import http.server
 import os
 import queue
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -125,8 +126,8 @@ def load_p2d_cache(input_path, studio=False):
 
 def take_p2d(body, cache_path, studio):
     """Strip the \\0P2D lines of a run; engine answers from Studio go to the cache file."""
-    rec = re.findall(r"\x00P2D ([^\t\n]+)\t([^\n]*)\n", body)
-    body = re.sub(r"\x00P2D [^\n]*\n", "", body)
+    rec = re.findall(mark("P2D ") + r"([^\t\n]+)\t([^\n]*)\n", body)
+    body = re.sub(mark("P2D ") + r"[^\n]*\n", "", body)
     nmodel = sum(1 for k, v in rec if v.endswith("\tmodel"))
     if nmodel:
         print("[*] %d Path2D answers computed by the offline engine model" % nmodel, file=sys.stderr)
@@ -139,12 +140,30 @@ def take_p2d(body, cache_path, studio):
     return body
 
 def p2d_miss(body, cache_path):
-    if "\x00P2DMISS" not in body:
+    if mark("P2DMISS") not in body:
         return body
     print("[!] this script derives keys from a Path2D call the offline model does not cover\n"
           "    (e.g. a Frame sized with Scale); run it once with --studio (writes %s)" % cache_path,
           file=sys.stderr)
-    return body.replace("\x00P2DMISS\n", "")
+    return body.replace(mark("P2DMISS") + "\n", "")
+
+# The analyzed script can climb the Lua stack with getfenv(2+) from inside any
+# callback the harness calls into (and from the runner coroutine body), so
+# every harness closure it can reach must not carry the real globals: a shield
+# environment (stdlib only, no loadstring/getfenv/setfenv/_G) is set on the
+# function wrapping the runtime below. Sensitive values (__MARK, __SOURCE, ...)
+# are parameters of that wrapper, i.e. upvalues -- getfenv only hands out
+# environment tables, so they stay invisible. The outer chunk's own frames are
+# unreachable: getfenv levels cannot cross the coroutine resume boundary.
+SHIELD_STDLIB = """{
+        string = string, math = math, table = table, os = os, debug = debug,
+        coroutine = coroutine, bit32 = bit32, buffer = buffer, utf8 = utf8, vector = vector,
+        type = type, typeof = typeof, pairs = pairs, ipairs = ipairs, next = next,
+        select = select, rawget = rawget, rawset = rawset, rawequal = rawequal,
+        rawlen = rawlen, setmetatable = setmetatable, getmetatable = getmetatable,
+        tostring = tostring, tonumber = tonumber, error = error, assert = assert, print = print,
+        pcall = pcall, xpcall = xpcall, unpack = table.unpack, newproxy = newproxy,
+}"""
 
 def build_harness(source, cfg, chunks=None):
     with open(os.path.join(RUNTIME_DIR, "envlog.luau"), encoding="utf-8") as f:
@@ -158,16 +177,22 @@ def build_harness(source, cfg, chunks=None):
         rdata = f.read()
     with open(os.path.join(RUNTIME_DIR, "datatypes.luau"), encoding="utf-8") as f:
         dtypes = f.read().replace("--!nocheck", "", 1)
-    return ("local __SOURCE = " + long_string(source) + "\n"
-            "local __CONFIG = " + cfg_lua + "\n"
-            "local __P2D = {" + "".join("[%s] = %s,\n" % (lua_value(k), lua_value(v))
-                                        for k, v in P2D_CACHE.items()) + "}\n"
-            "local __CHUNKS = {" + "".join("[%s] = %s,\n" % (lua_value(k), long_string(v))
-                                           for k, v in (chunks or {}).items()) + "}\n"
+    LAST_MARK[0] = secrets.token_hex(8)
+    return ("local __STDLIB = " + SHIELD_STDLIB + "\n"
+            "local __SHIELD = setmetatable({}, { __index = __STDLIB })\n"
             "local __UNICODE = (function()\n" + udata + "\nend)()\n"
             "local __ROBLOX = (function()\n" + rdata + "\nend)()\n"
-
-            "__ROBLOX.datatypes = (function()\n" + dtypes + "\nend)()\n" + runtime)
+            "__ROBLOX.datatypes = (function()\n" + dtypes + "\nend)()\n"
+            "local __RAW = { getfenv = getfenv, setfenv = setfenv, loadstring = loadstring }\n"
+            "local __RUN = function(__MARK, __SOURCE, __CONFIG, __P2D, __CHUNKS, __UNICODE, __ROBLOX, __RAW)\n"
+            + runtime + "\n"
+            "end\n"
+            "setfenv(__RUN, __SHIELD)\n"
+            "return __RUN(" + lua_value(LAST_MARK[0]) + ", " + long_string(source) + ", " + cfg_lua + ",\n"
+            "  {" + "".join("[%s] = %s,\n" % (lua_value(k), lua_value(v))
+                             for k, v in P2D_CACHE.items()) + "},\n"
+            "  {" + "".join("[%s] = %s,\n" % (lua_value(k), long_string(v))
+                             for k, v in (chunks or {}).items()) + "}, __UNICODE, __ROBLOX, __RAW)\n")
 
 def chunk_key(src):
     """Same key as srcKey() in envlog.luau."""
@@ -180,11 +205,20 @@ def take_chunks(body):
     """[(key, source)] of the big loadstring'd chunks a run reported (\\0CHUNK),
     and the body without them. Chunks passed back in `chunks` run instead of
     the original (a plugin instruments them like the main script)."""
-    found = re.findall(r"\x00CHUNK (\S+)\n([0-9a-f]*)\n", body)
-    body = re.sub(r"\x00CHUNK \S+\n[0-9a-f]*\n", "", body)
+    found = re.findall(mark("CHUNK ") + r"(\S+)\n([0-9a-f]*)\n", body)
+    body = re.sub(mark("CHUNK ") + r"\S+\n[0-9a-f]*\n", "", body)
     return [(k, bytes.fromhex(hx).decode("latin-1")) for k, hx in found], body
 
 LAST_RAW = [""]     
+
+LAST_MARK = [""]    # per-run protocol nonce (see envlog.luau MARK); set by build_harness
+
+def mark(s):
+    """The \0-protocol line prefix of the current run. The runtime prefixes
+    every marker with a per-run nonce the analyzed script never learns, so
+    output the script controls (a leaked raw print, crafted error strings)
+    cannot forge protocol lines the drivers parse."""
+    return "\x00" + LAST_MARK[0] + s
 
 HEARTBEAT = 2       
 STALL = 20          
@@ -234,9 +268,9 @@ def run_once(luau, source, cfg, hpath, timeout, keep, chunks=None):
     finally:
         if not keep and os.path.exists(hpath):
             os.remove(hpath)
-    stdout = re.sub(r"\x00HB\r?\n {16384}\r?\n", "", out.decode("utf-8", "replace")).replace("\r\n", "\n")
+    stdout = re.sub(mark("HB") + r"\r?\n {16384}\r?\n", "", out.decode("utf-8", "replace")).replace("\r\n", "\n")
     LAST_RAW[0] = stdout + errb.decode("utf-8", "replace")
-    m = re.search(r"\x00ENVLOG-BEGIN\n(.*?)\x00ENVLOG-END", stdout, re.S)
+    m = re.search(mark("ENVLOG-BEGIN") + r"\n(.*?)" + mark("ENVLOG-END"), stdout, re.S)
     if not m:
         return None, stdout[-3000:] + "\n" + errb.decode("utf-8", "replace")[-3000:]
 
@@ -261,13 +295,13 @@ class HarnessServer:
     Its output is read in raw chunks up to the ENVLOG-END sentinel: stdout to a
     pipe is block-buffered, and the padding the harness prints after the
     sentinel only pushes the buffer out."""
-    END = b"\x00ENVLOG-END"
 
     def __init__(self, luau, source, cfg, chunks):
         import tempfile
         self.dir = tempfile.mkdtemp(prefix="deobf_serve_")
         with open(os.path.join(self.dir, "harness.luau"), "w", encoding="latin-1", newline="\n") as f:
             f.write(build_harness(source, dict(cfg, serve=True), chunks))
+        self.END = mark("ENVLOG-END").encode()   # after build_harness: same nonce
         self.proc = subprocess.Popen([luau], cwd=self.dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT)
         self.buf = b""
@@ -318,7 +352,7 @@ class HarnessServer:
         out, self.buf = self.buf[:i], self.buf[i:]
         out = out.decode("utf-8", "replace").replace("\r\n", "\n")
         LAST_RAW[0] = out
-        m = re.search(r"\x00ENVLOG-BEGIN\n(.*?)\x00ENVLOG-END", out, re.S)
+        m = re.search(mark("ENVLOG-BEGIN") + r"\n(.*?)" + mark("ENVLOG-END"), out, re.S)
         if not m:
             return None, out[-3000:]
         return m.group(1), None
@@ -343,7 +377,7 @@ class HarnessServer:
         body, err = self.request({"force_req": ";".join(paths), "force_buf": bufs}, timeout, "fetch")
         if body is None:
             raise RuntimeError("harness fetch failed: " + err[-300:])
-        m = re.search(r"\x00FETCH ([^\n]*)\n", body)
+        m = re.search(mark("FETCH ") + r"([^\n]*)\n", body)
         if not m or m.group(1).startswith("error:"):
             raise RuntimeError("harness fetch failed: " + (m.group(1)[:300] if m else body[-300:]))
         return m.group(1)
@@ -360,8 +394,8 @@ def trace_text(body):
     no machine-readable lines, and string/number literals masked (scripts
     that use random values trace differently every run; a wrong key
     changes what runs, not just literals)."""
-    body = re.sub(r"\x00CHUNK \S+\n[0-9a-f]*\n", "", body)
-    body = re.sub(r"\x00(PROTOS|FORCE|P2D|TRIGGER)[^\n]*\n?", "", body)
+    body = re.sub(r"\x00[0-9a-f]{8,32}CHUNK \S+\n[0-9a-f]*\n", "", body)
+    body = re.sub(r"\x00[0-9a-f]{8,32}(PROTOS|FORCE|P2D|TRIGGER)[^\n]*\n?", "", body)
 
     body = re.sub(r"(?<=[ \t])(?=\S)(?:[A-Za-z]:)?[^:\n]*?\.luau:", "harness:", body)
     body = re.sub(r"harness:\d+: ", "", body)
@@ -478,9 +512,12 @@ def run_once_studio(bridge, source, cfg, timeout, chunks=None):
         return None, "no result from Studio within %ds (is the loader running?)" % timeout
     out = out.replace("\r\n", "\n")
     LAST_RAW[0] = out
+    # ENVLOG-FAIL here is emitted by the Studio loader itself (it cannot know
+    # the per-run nonce); it only fires when the harness chunk failed to load
+    # or run at all, so the analyzed script can never produce it.
     if out.startswith("\x00ENVLOG-FAIL"):
         return None, "harness failed in Studio: " + out[len("\x00ENVLOG-FAIL\n"):]
-    m = re.search(r"\x00ENVLOG-BEGIN\n(.*?)\x00ENVLOG-END", out, re.S)
+    m = re.search(mark("ENVLOG-BEGIN") + r"\n(.*?)" + mark("ENVLOG-END"), out, re.S)
     if not m:
         return None, out[-3000:]
     return m.group(1), None

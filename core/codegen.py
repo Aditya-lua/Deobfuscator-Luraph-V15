@@ -20,10 +20,71 @@ FLIPPED = {"CompareLt": "CompareGt", "CompareLe": "CompareGe"}
 
 _LEAF_TYPES = set()     
 
+def _ch_index(e):
+    return [e.obj, e.key]
+
+def _ch_bin(e):
+    return [e.a, e.b]
+
+def _ch_un(e):
+    return [e.a]
+
+def _ch_ifexp(e):
+    return [e.c, e.a, e.b]
+
+def _ch_calle(e):
+    out = [e.fn]
+    out += e.args.items
+    if e.args.tail is not None:
+        out.append(TailRef(e.args.tail))
+    return out
+
+def _ch_symlist(e):
+    out = list(e.items)
+    if e.tail is not None:
+        out.append(TailRef(e.tail))
+    return out
+
+def _ch_tailref(e):
+    return [e.tail.call] if isinstance(e.tail, InlineTail) else []
+
+def _ch_newtable(e):
+    out = []
+    for k, v in e.items:
+        if k is not None:
+            out.append(k)
+        out.append(v)
+    if e.tail is not None:
+        out.append(TailRef(e.tail))
+    return out
+
+def _ch_geniter(e):
+    return list(e.args)
+
+def _ch_closure(e):
+    out = []
+    for u in e.upvals:
+        if type(u).__name__ == "MaybeBox":
+            out.append(Reg(u.reg))
+        elif isinstance(u, S.LTable) and any(type(v).__name__ == "RegFile" for v in u.h.values()):
+            out += [Reg(v) for v in u.h.values() if isinstance(v, int)][:1]
+        elif isinstance(u, Reg):
+            out.append(u)
+    return out
+
+_CHILDREN = {}
+
 def children(e):
     """Sub-expressions of an IR expression (for walking)."""
-    if type(e) in _LEAF_TYPES:
+    t = type(e)
+    if t in _LEAF_TYPES:
         return []
+    f = _CHILDREN.get(t)
+    if f is not None:
+        return f(e)
+    # unknown type: same semantics as before -- treat it as a leaf and
+    # remember it (the isinstance chain below kept the original behaviour
+    # for any subclass of a known complex type)
     if isinstance(e, (Index,)):
         return [e.obj, e.key]
     if isinstance(e, Bin):
@@ -50,17 +111,8 @@ def children(e):
     if isinstance(e, GenIterE):
         return list(e.args)
     if isinstance(e, ClosureExpr):
-
-        out = []
-        for u in e.upvals:
-            if type(u).__name__ == "MaybeBox":
-                out.append(Reg(u.reg))
-            elif isinstance(u, S.LTable) and any(type(v).__name__ == "RegFile" for v in u.h.values()):
-                out += [Reg(v) for v in u.h.values() if isinstance(v, int)][:1]
-            elif isinstance(u, Reg):
-                out.append(u)
-        return out
-    _LEAF_TYPES.add(type(e))
+        return _ch_closure(e)
+    _LEAF_TYPES.add(t)
     return []
 
 def map_expr(e, fn):
@@ -145,17 +197,34 @@ def walk(e):
         yield x
         st += children(x)
 
+def _uses_of(e, regs, temps):
+    """One walk collecting both regs read and temps read (regs_read +
+    temps_read used to walk the same expression twice)."""
+    st = [e]
+    while st:
+        x = st.pop()
+        if x is None:
+            continue
+        if isinstance(x, Reg):
+            if regs is not None:
+                regs.append(x.n)
+        elif isinstance(x, TempVal):
+            if temps is not None:
+                temps.append(x.t)
+        elif isinstance(x, TailRef) and isinstance(x.tail, TempTail):
+            if temps is not None:
+                temps.append(x.tail.t)
+        st += children(x)
+
 def regs_read(e):
-    return [x.n for x in walk(e) if isinstance(x, Reg)]
+    regs = []
+    _uses_of(e, regs, None)
+    return regs
 
 def temps_read(e):
-    out = []
-    for x in walk(e):
-        if isinstance(x, TempVal):
-            out.append(x.t)
-        elif isinstance(x, TailRef) and isinstance(x.tail, TempTail):
-            out.append(x.tail.t)
-    return out
+    temps = []
+    _uses_of(e, None, temps)
+    return temps
 
 def has_side_effects(e):
     return any(isinstance(x, CallE) for x in walk(e))
@@ -277,8 +346,7 @@ def stmt_uses(st):
     """(regs read, temps read) by a statement (lvalue sub-expressions count as reads)."""
     regs, temps = [], []
     for e in _stmt_exprs(st):
-        regs += regs_read(e)
-        temps += temps_read(e)
+        _uses_of(e, regs, temps)
     return regs, temps
 
 def stmt_regs(st):
@@ -369,6 +437,30 @@ def movable(e):
 def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
     st = b.stmts
 
+    memo = {}
+
+    def _memo_entry(x):
+        m = memo.get(id(x))
+        if m is None or m[0] is not x:
+            # holding x in m keeps its id alive, so an id can never come back
+            # as a different object while the memo entry exists
+            m = memo[id(x)] = (x, stmt_uses(x), stmt_defs(x))
+        return m
+
+    # shared by the temp-def forward scans and the inline pass below: both
+    # memoize stmt_uses/stmt_defs per statement object; replacements that
+    # mutate a statement in place (map_stmt on ForPrepS) must drop its entry
+    def scan_uses(x):
+        return _memo_entry(x)[1]
+
+    def scan_defs(x):
+        return _memo_entry(x)[2]
+
+    def ud(x):
+        m = _memo_entry(x)
+        return m[1][0], m[2]
+    ud.memo = memo
+
     out = []
     i = 0
     while i < len(st):
@@ -400,10 +492,10 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
                 blocked = False
                 inputs = set(regs_read(s.call))
                 while k < len(st):
-                    _, ts = stmt_uses(st[k])
+                    ts = scan_uses(st[k])[1]
                     if s.t in ts:
                         break
-                    if inputs & set(stmt_defs(st[k])):
+                    if inputs & set(scan_defs(st[k])):
 
                         blocked = True
                     elif isinstance(st[k], (CloseS, CommentS)) or fresh_table_store(st, k):
@@ -415,7 +507,10 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
                     k += 1
                 if k < len(st) and not blocked and not call_before(st[k], b, is_temp(s.t)) \
                         and not truncated_use(st[k], b, lambda x: isinstance(x, TempVal) and x.t == s.t):
-                    st[k] = subst_temp(st[k], s.t, s.call)
+                    old = st[k]
+                    st[k] = subst_temp(old, s.t, s.call)
+                    if st[k] is old:
+                        memo.pop(id(old), None)
                     i += 1
                     continue
                 if k == len(st) and not blocked:
@@ -432,16 +527,6 @@ def simplify_block(b, live_out, temp_uses_total, open_in=frozenset()):
         out.append(s)
         i += 1
     b.stmts = out
-
-    memo = {}
-
-    def ud(x):
-        m = memo.get(id(x))
-        if m is None or m[0] is not x:
-            u = stmt_uses(x)[0]
-            m = memo[id(x)] = (x, u, stmt_defs(x))
-        return m[1], m[2]
-    ud.memo = memo
 
     changed = True
     while changed:
@@ -1143,9 +1228,10 @@ def simplify_blocks(blocks, D):
             changed |= fold_tables(b)
         live_out = liveness(blocks)
         opened = open_registers(blocks)
+        tu = count_temp_uses(blocks)
         for b in blocks.values():
             copy_propagate(b, live_out[b.id], opened[b.id])
-            simplify_block(b, live_out[b.id], count_temp_uses(blocks), opened[b.id])
+            simplify_block(b, live_out[b.id], tu, opened[b.id])
         if not changed:
             break
 
@@ -1709,3 +1795,10 @@ def quote(b):
         i += 1
     out.append('"')
     return "".join(out)
+
+# populate the children dispatch now that every expression class exists
+# (function bodies resolve at call time, the dict keys cannot)
+_CHILDREN.update({Index: _ch_index, Bin: _ch_bin, Un: _ch_un, IfExp: _ch_ifexp,
+                  CallE: _ch_calle, SymList: _ch_symlist, TailRef: _ch_tailref,
+                  NewTableE: _ch_newtable, GenIterE: _ch_geniter,
+                  ClosureExpr: _ch_closure})

@@ -3428,6 +3428,19 @@ local function httpRequest(label)
                 if R.type(opts.Url) == "string" then remember(urls, opts.Url) end
                 -- CFG.http_map: canned responses for request()-style calls
                 -- (syn.request/request/http_request), same schema as HttpGet's
+                -- the sephal anti-tamper nils new CFG/http_map fields mid-run
+                -- but preserves CFG.readfile_map (shallow snapshot: shared
+                -- table reference) -- serve the session response from it
+                if R.type(opts.Url) == "string" and R.find(opts.Url, "x.luarmor", 1, true) and R.type(CFG.readfile_map) == "table" then
+                        local body = CFG.readfile_map["__lrm_session_response"]
+                        if body then
+                                local okh, hdrs = R.pcall(function() return R.json.decode(
+                                        CFG.readfile_map.__lrm_session_headers or "{}") end)
+                                comment(label .. " -> canned via readfile_map (" .. R.tostring(#body) .. " bytes)")
+                                return { Success = true, StatusCode = 200,
+                                        Headers = (okh and hdrs) or {}, Body = body }
+                        end
+                end
                 if CFG.http_map and R.type(opts.Url) == "string" then
                         local method = R.tostring(opts.Method or opts.method or "GET"):upper()
                         local hit = CFG.http_map[method .. " " .. opts.Url] or CFG.http_map[opts.Url]
@@ -5144,6 +5157,14 @@ if CFG.serve then
                         end)
                         if ok2 then
                                 CFG.http_map = decoded
+                                -- stash bodies under the tamper-proof key as
+                                -- well: readfile_map survives the snapshot
+                                for k, v in R.next, decoded do
+                                        if R.type(v) == "table" and v.body then
+                                                CFG.readfile_map = CFG.readfile_map or {}
+                                                CFG.readfile_map["__lrm_session_response"] = v.body
+                                        end
+                                end
                         end
                         R.print(MARK .. "HTTPMAP " .. R.tostring(ok2) .. " keys="
                                 .. (function()
@@ -5155,6 +5176,23 @@ if CFG.serve then
                                 end)())
                         R.print(SERVE_PAD)
                         return
+                end
+                if mode == "start" and R.type(req) == "string" and #req > 0 then
+                        -- a session response handed in with this run: overwrite
+                        -- the placeholder CFG.readfile_map["__lrm_session_response"]
+                        -- (the key is planted at build time, so the bootstrap's
+                        -- anti-tamper key-diff restore keeps its CURRENT value;
+                        -- new keys would be deleted). req is the raw body.
+                        CFG.readfile_map = CFG.readfile_map or {}
+                        local bodyv, headerv = req, "{}"
+                        local okp, parsed = R.pcall(function() return R.json.decode(req) end)
+                        if okp and R.type(parsed) == "table" and R.type(parsed.body) == "string" then
+                                bodyv = parsed.body
+                                headerv = R.json.encode(parsed.headers or {})
+                        end
+                        CFG.readfile_map["__lrm_session_response"] = bodyv
+                        CFG.readfile_map["__lrm_session_headers"] = headerv
+                        R.print(MARK .. "RESP-PLANTED " .. R.tostring(#bodyv) .. " hdr=" .. R.tostring(#headerv))
                 end
                 if mode == "start" then
                         -- the run itself, from a REPL statement of its own: inside require()

@@ -38,7 +38,13 @@ LUAU = os.path.join(REPO, "bin", "luau")
 
 def build_serve_process(primed_source, init_text, outdir):
     cfg = {
-        "readfile_map": {"static_content_170926/init-f07dbcbe19a-sephal.lua": init_text},
+        "readfile_map": {
+            "static_content_170926/init-f07dbcbe19a-sephal.lua": init_text,
+            # planted at build time: present in the bootstrap's phase-1 state
+            # snapshot, so the anti-tamper key-diff restore keeps the key (and
+            # its CURRENT value once the real body is passed in with phase 2)
+            "__lrm_session_response": "PENDING",
+        },
         "time_pin": 1790607955,
         "time_budget": 120, "devirt": False, "spin": 60, "trace_globals": True,
         "serve": True,
@@ -85,12 +91,16 @@ def repl(proc, stmt, timeout=60, expect=None):
 
 def extract_url(trace):
     m = re.search(r'Url = "(https://x\.luarmor\.net[^"]*)"', trace)
+    if m:
+        return m.group(1)
+    m = re.search(r'--\s+(https://x\.luarmor\.net\S+)', trace)
     return m.group(1) if m else None
 
 
 def main():
     loader_path, init_path = sys.argv[1], sys.argv[2]
     outdir = sys.argv[3] if len(sys.argv) > 3 else "/tmp/lrm_2phase"
+    script_key = os.environ.get("LRM_SCRIPT_KEY")
     os.makedirs(outdir, exist_ok=True)
 
     if loader_path.startswith("http"):
@@ -106,7 +116,10 @@ def main():
     init = parse_init(init_text)
     print("[1] loader: module id %s, %d _bsdata0 entries" % (stub["module_id"], stub["bsdata0_line"].count(",")))
 
-    primed = build_input(stub, init, stub["module_id"], None, init_text)
+    primed = build_input(stub, init, stub["module_id"], script_key, init_text)
+    if not script_key:
+        print("    [i] no LRM_SCRIPT_KEY set: the session decrypt will fail by "
+              "design (the server keys the response to the real script key)")
     pp = os.path.join(outdir, "primed.lua")
     with open(pp, "w", encoding="latin-1") as f:
         f.write(primed)
@@ -127,16 +140,23 @@ def main():
     print("[2] phase 1: building the handshake in-sandbox ...")
     proc.stdin.write(b'__S = require("./harness")\n')
     proc.stdin.flush()
-    time.sleep(6)                      # let the 2.9 MB harness module compile
+    time.sleep(8)                      # let the 2.9 MB harness module compile
     try:                                # drain anything the compile printed
         while select.select([proc.stdout], [], [], 0.5)[0]:
             if not proc.stdout.read1(1 << 20):
                 break
     except Exception:
         pass
-    t1, err = repl(proc, '__S("", "", "start")', 240)
-    if t1 is None:
-        print("[!] phase 1 failed:", repr((err or "")[-600:]))
+    # the REPL occasionally swallows a statement sent right after the compile;
+    # starts are idempotent (b is process-stable), so just re-send on silence
+    t1, err = None, None
+    for attempt in range(3):
+        t1, err = repl(proc, '__S("", "", "start")', 120)
+        if t1 is not None and extract_url(t1):
+            break
+        print("    (retry %d: no reply/URL)" % (attempt + 1))
+    if t1 is None or not extract_url(t1):
+        print("[!] phase 1 failed:", repr((err or "")[-400:]))
         return 1
     open(os.path.join(outdir, "phase1.raw.txt"), "w", encoding="latin-1").write(t1)
     url = extract_url(t1)
@@ -146,7 +166,12 @@ def main():
     print("    %s" % url[:110])
 
     print("[3] live handshake replay ...")
-    status, body = http_get(url)
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": ROBLOX_UA})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        body = r.read().decode("latin-1")
+        resp_headers = {k: v for k, v in r.headers.items()}
+    status = 200
     kind = classify_response(body)
     print("    HTTP %s, %s (%d bytes)" % (status, kind, len(body)))
     open(os.path.join(outdir, "live_response.txt"), "w", encoding="latin-1").write(body)
@@ -171,7 +196,15 @@ def main():
     print("    injected ok:", [l.strip()[:120] for l in t2.splitlines() if "HTTPMAP" in l or "READBACK" in l])
 
     print("[5] phase 2: same process replays the handshake and decrypts ...")
-    t3, err = repl(proc, '__S("", "", "start")', 240)
+    nreq += 1
+    mod = os.path.join(d, "resp_%d.luau" % nreq)
+    # quoted+escaped string: the runtime require rejects long-bracket modules
+    # that luau-ast accepts (observed: "Expected <eof>, got ']'")
+    payload = json.dumps({"body": body, "headers": resp_headers})
+    lit = '"' + payload.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    with open(mod, "w", encoding="latin-1") as f:
+        f.write("return %s\n" % lit)
+    t3, err = repl(proc, '__S(require("./resp_%d"), "", "start")' % nreq, 240)
     if t3 is None:
         print("[!] phase 2 failed:", (err or "")[-400:])
         return 1

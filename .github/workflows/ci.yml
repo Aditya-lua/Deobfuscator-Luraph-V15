@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: unit + protocol (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Syntax-check every Python file
+        run: python -m compileall -q core src test build_luau.py
+
+      - name: Syntax-check every JS file
+        if: runner.os == 'Linux'
+        run: |
+          fails=0
+          for f in $(git ls-files '*.js'); do
+            node --check "$f" || fails=1
+          done
+          exit $fails
+
+      - name: Fast tests (unit + cross-language protocol)
+        run: python test/run_all.py
+
+  golden:
+    name: golden regression (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache built Luau binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: luau-build-${{ runner.os }}-${{ hashFiles('build_luau.py') }}
+
+      - name: Build the patched Luau runtime
+        run: python build_luau.py
+
+      - name: Golden regression (full pipeline vs committed outputs)
+        run: python test/run_all.py --golden

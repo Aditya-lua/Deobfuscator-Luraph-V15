@@ -1,4 +1,5 @@
 import http.server
+import json
 import os
 import queue
 import re
@@ -14,6 +15,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "..", "bin") if os.path.exists(os.path.join(HERE, "..", "bin")) else os.path.join(HERE, "bin")
 RUNTIME_DIR = os.path.join(HERE, "..", "runtime") if os.path.exists(os.path.join(HERE, "..", "runtime")) else HERE
 LUAU_URL = "https://github.com/luau-lang/luau/releases/latest/download/luau-windows.zip"
+
+# Protocol constants shared with the Node driver and the Luau runtime (see
+# protocol.json at the repo root and runtime/envlog.luau's PROTO table).
+with open(os.path.join(HERE, "..", "protocol.json"), encoding="utf-8") as _pf:
+    PROTO = json.load(_pf)
+
+def proto_lua():
+    """The PROTO table of runtime/envlog.luau, regenerated from protocol.json
+    (build_harness injects it so the runtime always matches this file)."""
+    ch = PROTO["chunk_hash"]
+    return ("local PROTO = { hash_mult = %d, hash_mod = %d, hash_stride = %d, chunk_min = %d }"
+            % (ch["multiplier"], ch["modulus"], ch["stride"], ch["min_len"]))
+
+PROTO_LINE_RE = re.compile(r"local PROTO = \{[^}]*\}")
 
 def find_luau():
     exe = "luau.exe" if os.name == "nt" else "luau"
@@ -92,13 +107,6 @@ def parse_cfg_value(v):
     return True if v in ("", "true") else False if v == "false" else \
         int(v) if re.fullmatch(r"-?\d+", v) else v
 
-def base_cfg(args):
-    """The runtime config (envlog.luau CFG) from the shared command line options."""
-    cfg = {"time_budget": args.budget, "executor": args.executor}
-    if args.input_text is not None:
-        cfg["input_text"] = args.input_text
-    return cfg
-
 def user_cfg(args, cfg):
     """--cfg KEY=VALUE options on top of cfg (they win over plugin defaults)."""
     for kv in args.cfg:
@@ -171,13 +179,20 @@ def build_harness(source, cfg, chunks=None):
     cfg_lua = "{" + ", ".join("%s = %s" % (k, lua_value(v)) for k, v in cfg.items()) + "}"
 
     runtime = runtime.replace("--!nocheck", "", 1)
+    # PROTO constants: always inject the current protocol.json values so the
+    # runtime can never drift from the drivers (the baked-in defaults are a
+    # fallback for standalone Studio runs; protocol_test.py keeps them equal).
+    if not PROTO_LINE_RE.search(runtime):
+        raise RuntimeError("runtime/envlog.luau lost its `local PROTO = {...}` line; "
+                           "restore it (see protocol.json)")
+    runtime = PROTO_LINE_RE.sub(proto_lua(), runtime, count=1)
     with open(os.path.join(RUNTIME_DIR, "unicode_data.luau"), encoding="ascii") as f:
         udata = f.read()
     with open(os.path.join(RUNTIME_DIR, "roblox_api.luau"), encoding="ascii") as f:
         rdata = f.read()
     with open(os.path.join(RUNTIME_DIR, "datatypes.luau"), encoding="utf-8") as f:
         dtypes = f.read().replace("--!nocheck", "", 1)
-    LAST_MARK[0] = secrets.token_hex(8)
+    LAST_MARK[0] = secrets.token_hex(PROTO["nonce_hex_bytes"])
     return ("local __STDLIB = " + SHIELD_STDLIB + "\n"
             "local __SHIELD = setmetatable({}, { __index = __STDLIB })\n"
             "local __UNICODE = (function()\n" + udata + "\nend)()\n"
@@ -195,10 +210,11 @@ def build_harness(source, cfg, chunks=None):
                              for k, v in (chunks or {}).items()) + "}, __UNICODE, __ROBLOX, __RAW)\n")
 
 def chunk_key(src):
-    """Same key as srcKey() in envlog.luau."""
+    """Same key as srcKey() in envlog.luau (parameters from protocol.json; the
+    only Python definition -- devirt.py imports this one)."""
     h = 0
     for b in src.encode("latin-1"):
-        h = (h * 31 + b) % 2147483648
+        h = (h * PROTO["chunk_hash"]["multiplier"] + b) % PROTO["chunk_hash"]["modulus"]
     return "%d_%d" % (len(src), h)
 
 def take_chunks(body):
@@ -220,8 +236,8 @@ def mark(s):
     cannot forge protocol lines the drivers parse."""
     return "\x00" + LAST_MARK[0] + s
 
-HEARTBEAT = 2       
-STALL = 20          
+HEARTBEAT = PROTO["heartbeat_seconds"]
+STALL = PROTO["stall_seconds"]
 
 def _communicate(cmd, timeout, stall):
     """subprocess.run(capture_output=True) that also gives up when the process

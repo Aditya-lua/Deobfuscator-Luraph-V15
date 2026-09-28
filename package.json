@@ -8,10 +8,10 @@
   },
   "scripts": {
     "start": "node deob.js",
-    "test": "node deob.js samples/001_vm_like_dispatch-obfuscated.lua"
+    "test": "node test/run.js"
   },
   "keywords": ["luraph", "deobfuscator", "roblox", "luau"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs"
 }

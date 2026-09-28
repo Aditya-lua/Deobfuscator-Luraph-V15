@@ -7,26 +7,9 @@ CORE_DIR = os.path.join(HERE, "..", "core")
 if CORE_DIR not in sys.path:
     sys.path.insert(0, CORE_DIR)
 
-from backend import run_big_stack
-from obfuscators.luraph_v15 import devirt
-
 cmd = sys.argv[1]
 
-if cmd == "collect":
-    source_path = sys.argv[2]
-    protos_path = sys.argv[3]
-    chunk_paths = sys.argv[4:]
-    stats, reqs, bufs = run_big_stack(
-        devirt.collect_requests, source_path, protos_path, chunk_paths
-    )
-    result = {
-        "stats": stats,
-        "requests": sorted(list(reqs)),
-        "bufs": bufs,
-    }
-    print(json.dumps(result))
-
-elif cmd == "pipeline":
+if cmd == "pipeline":
 
     config_file = sys.argv[2]
     with open(config_file, "r", encoding="utf-8") as f:
@@ -101,4 +84,4 @@ elif cmd == "pipeline":
     print(json.dumps({"success": True, "output": c["dpath"]}))
 
 else:
-    sys.exit(f"Unknown command: {cmd}")
+    sys.exit(f"Unknown command: {cmd} (expected: pipeline)")

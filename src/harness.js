@@ -11,8 +11,17 @@ const HERE = __dirname;
 const BIN = path.join(HERE, '..', 'bin');
 const LUAU_URL = 'https://github.com/luau-lang/luau/releases/latest/download/luau-windows.zip';
 
-const HEARTBEAT = 2;
-const STALL = 20;
+// Protocol constants shared with the Python core and the Luau runtime (see
+// protocol.json at the repo root and runtime/envlog.luau's PROTO table).
+const PROTO = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'protocol.json'), 'utf8'));
+const HEARTBEAT = PROTO.heartbeat_seconds;
+const STALL = PROTO.stall_seconds;
+
+function protoLua() {
+  const ch = PROTO.chunk_hash;
+  return `local PROTO = { hash_mult = ${ch.multiplier}, hash_mod = ${ch.modulus}, hash_stride = ${ch.stride}, chunk_min = ${ch.min_len} }`;
+}
+const PROTO_LINE_RE = /local PROTO = \{[^}]*\}/;
 
 // Per-run protocol nonce: buildHarness generates it and prepends `local
 // __MARK` before envlog.luau; every \0 marker the runtime prints carries it.
@@ -94,7 +103,7 @@ function luaValue(v) {
 function chunkKey(src) {
   const bytes = Buffer.from(src, 'latin1');
   let h = 0;
-  for (const b of bytes) h = ((h * 31 + b) % 2147483648);
+  for (const b of bytes) h = ((h * PROTO.chunk_hash.multiplier + b) % PROTO.chunk_hash.modulus);
   return `${bytes.length}_${h}`;
 }
 
@@ -156,6 +165,14 @@ function buildHarness(source, cfg, chunks = {}) {
   const runtimeFile = path.join(HERE, '..', 'runtime', 'envlog.luau');
   let runtime = fs.readFileSync(runtimeFile, 'utf8').replace('--!nocheck', '');
 
+  // PROTO constants: always inject the current protocol.json values so the
+  // runtime can never drift from the drivers (the baked-in defaults are a
+  // fallback for standalone Studio runs; protocol_test.py keeps them equal).
+  if (!PROTO_LINE_RE.test(runtime)) {
+    throw new Error("runtime/envlog.luau lost its `local PROTO = {...}` line; restore it (see protocol.json)");
+  }
+  runtime = runtime.replace(PROTO_LINE_RE, protoLua());
+
   const unicodeFile = path.join(HERE, '..', 'runtime', 'unicode_data.luau');
   const robloxFile = path.join(HERE, '..', 'runtime', 'roblox_api.luau');
   const dtypesFile = path.join(HERE, '..', 'runtime', 'datatypes.luau');
@@ -168,7 +185,7 @@ function buildHarness(source, cfg, chunks = {}) {
   const p2dLua = '{' + [...P2D_CACHE.entries()].map(([k, v]) => `[${luaValue(k)}] = ${luaValue(v)},\n`).join('') + '}';
   const chunksLua = '{' + Object.entries(chunks).map(([k, v]) => `[${luaValue(k)}] = ${longString(v)},\n`).join('') + '}';
 
-  MARK = crypto.randomBytes(8).toString('hex');
+  MARK = crypto.randomBytes(PROTO.nonce_hex_bytes).toString('hex');
 
   return (
     'local __STDLIB = ' + SHIELD_STDLIB + '\n' +

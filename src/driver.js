@@ -6,7 +6,6 @@ const vmmap = require('./vmmap');
 const harness = require('./harness');
 const trace = require('./traceout');
 const tidy = require('./tidy');
-const devirt = require('./devirt');
 
 const SPIN_CHECKS = 24;
 
@@ -216,89 +215,6 @@ async function run(job) {
     if (!fs.existsSync(job.tracePath)) writeTrace();
   }
   return job.tracePath;
-}
-
-async function liftWithRounds(job, runner, patched, cfg, chunks, runText, ppath, dpath, chunkPaths) {
-  const { args } = job;
-  const rounds = args.devirtRounds || 200;
-  const requested = new Set();
-  let lastBufs = '';
-  let text = null;
-  let quick = true;
-
-  for (let rnd = 1; rnd <= rounds; rnd++) {
-    const t1 = Date.now();
-    let full = !quick;
-
-    if (quick) {
-      let res;
-      try {
-        res = devirt.collectRequests(job.sourcePath, ppath, chunkPaths);
-      } catch (e) {
-        process.stderr.write(`[!] collect failed: ${e.message}\n`);
-        break;
-      }
-      const { stats, reqs, bufs } = res;
-      const newReqs = [...reqs].filter(x => !requested.has(x));
-      process.stderr.write(
-        `[*] devirt round ${rnd}: ${stats.functions} functions (${stats.walked} walked), ${stats.errors} unlifted blocks, ${newReqs.length} new constant requests (${((Date.now() - t1) / 1000).toFixed(1)}s)\n`
-      );
-
-      if (newReqs.length === 0 || rnd === rounds) {
-        full = true;
-      } else {
-        newReqs.forEach(r => requested.add(r));
-        lastBufs = bufs;
-
-        const c = Object.assign({}, cfg, {
-          force_req: [...requested].sort().join(';'),
-          force_buf: bufs,
-        });
-        const runRes = await runner.run(patched, c, chunks);
-        if (!runRes.body) {
-          process.stderr.write('[!] constant request run failed\n');
-          break;
-        }
-        const m = new RegExp(harness.mark('PROTOS ') + '([^\\n]*)\\n').exec(runRes.body);
-        if (!m || m[1].startsWith('error:')) {
-          process.stderr.write('[!] constant request run gave no protos\n');
-          break;
-        }
-        fs.writeFileSync(ppath, m[1], 'utf8');
-      }
-    }
-
-    if (full) {
-      process.stderr.write(`[*] devirtualizing (round ${rnd})...\n`);
-      const tFull = Date.now();
-      let res;
-      try {
-        res = devirt.liftProgram(job.sourcePath, ppath, chunkPaths, dpath);
-      } catch (e) {
-        process.stderr.write(`[!] lift failed: ${e.message}\n`);
-        break;
-      }
-      const { text: liftedText, stats, reqs } = res;
-      text = liftedText;
-      const newReqs = [...reqs].filter(x => !requested.has(x));
-      process.stderr.write(
-        `[*]   ${stats.functions} functions, ${stats.errors} unlifted blocks, ${stats.fallbacks} unstructured jumps, ${newReqs.length} new constant requests (${((Date.now() - tFull) / 1000).toFixed(1)}s)\n`
-      );
-
-      if (newReqs.length === 0 || rnd === rounds) break;
-      if (quick) {
-        process.stderr.write('[*]   the full lift needs more constants: continuing with full lifts\n');
-        quick = false;
-      }
-      newReqs.forEach(r => requested.add(r));
-    }
-  }
-
-  if (text) {
-    const header = job.creditHeader();
-    const prefix = header ? header + '\n' : '';
-    job.write(dpath, prefix + text + '\n');
-  }
 }
 
 async function runGeneric(job) {

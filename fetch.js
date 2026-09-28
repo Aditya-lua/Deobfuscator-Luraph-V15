@@ -68,23 +68,6 @@ async function fetchBypass(url) {
   return await fetchWithHeaders(url);
 }
 
-function extractChainedUrls(code) {
-  const urls = [];
-  const re = /(?:game:HttpGet|game:HttpGetAsync|readfile|loadstring)\s*\(\s*["'](https?:\/\/[^"'\\]+)["']/g;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    if (!urls.includes(m[1])) urls.push(m[1]);
-  }
-  const urlRe = /"((?:https?:\/\/)[^"\\]+)"|'((?:https?:\/\/)[^'\\]+)'/g;
-  while ((m = urlRe.exec(code)) !== null) {
-    const u = m[1] || m[2];
-    if (u && !urls.includes(u) && !u.includes('discord.gg') && !u.includes('github.com/luau-lang')) {
-      urls.push(u);
-    }
-  }
-  return urls;
-}
-
 function postBody(url, body, contentType = 'text/plain') {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);

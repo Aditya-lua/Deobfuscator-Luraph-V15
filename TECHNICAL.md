@@ -56,7 +56,8 @@ To reconstruct valid, clean Luau source code, the engine executes a multi-pass p
 - The hooked script executes inside a sandboxed Luau runtime (`envlog.luau`).
 - If an execution path hits an anti-tamper trap (`\0TRIGGER <pid>`), the engine identifies the responsible function, isolates it, and re-executes along stable code paths.
 
-### Stage 3: Symbolic Execution & Live Memory Decryption (`devirt.js`, `luasym.py`)
+### Stage 3: Symbolic Execution & Live Memory Decryption (`devirt_bridge.py`, `driver.py`, `luasym.py`)
+- The Node driver hands the trace to the Python core through `src/devirt_bridge.py` (one `pipeline` invocation per run; a big-stack thread protects the deep recursion).
 - Each proto is analyzed using **Sparse Conditional Constant Propagation (SCCP)**.
 - When the walker reaches lazy-encrypted constants, it queries the running Luau REPL server in memory (`harness.fetch`) via an IPC pipe.
 - The REPL decrypts the values on-the-fly and returns them in milliseconds, resolving thousands of constants in a few fast rounds.
@@ -81,3 +82,55 @@ To reconstruct valid, clean Luau source code, the engine executes a multi-pass p
 In standard devirtualization, the final verification pass often repeats the entire analysis over all functions. This engine implements a **Fast-Path Controller**:
 - Once all constants are resolved live with 0 unlifted blocks, the engine skips redundant collection passes and immediately triggers code generation.
 - This cuts 40–60 seconds off the total execution time for massive scripts (500+ functions).
+
+---
+
+## 4. Environment Variables
+
+Debug and tuning hooks used by the Python core and the Node driver. None are required; all default to off.
+
+| Variable | Set by | Effect |
+|---|---|---|
+| `PYTHON_BIN` | Node | Python executable the driver/bridge spawns (else `python3`, then `python`) |
+| `JNKIE_KEY` | Node | Delivery-API key for jnkie loader chains without a `getgenv().SCRIPT_KEY` variable |
+| `DEVIRT_WALK_LIMIT` | Python | SCCP walk budget per function (default `250000`; raised automatically for giant single-proto VMs) |
+| `DEVIRT_LOADERS` | Python | Also lift loader/VM-constructor protos, not just the payload VM |
+| `DEVIRT_FULL_ROUNDS` | Python | Disable quick constant-collection rounds; always run full lifts |
+| `DEVIRT_REQS` | Python | Print every pending constant request per round |
+| `DEVIRT_TIMING` | Python | Print per-stage timing and fetched-constant statistics |
+| `DEVIRT_ERRS` | Python | Print per-block walk errors with proto ids |
+| `DEVIRT_TB` | Python | Print full tracebacks for lifted-function errors (and attach one to the uncaught handler) |
+| `DEVIRT_DEBUG` | Python | Dump decision logs, block structure and non-payload lifts to stderr |
+| `DEVIRT_BLOCKS` | Python | Dump the CFG of the current function once (first hit only) |
+| `DEVIRT_NO_MERGE` | Python | Skip `merge_equivalent` CFG simplification |
+| `DEVIRT_NO_NAMES` | Python | Skip the local-name inference pass (`names.py`) |
+| `DEOB_PROFILE` | Python | Write a cProfile dump of the `pipeline` branch to this path |
+| `DEOB_PRETIDY` | Python | Write the pre-tidy trace text to this path |
+| `DEOB_SPIN_LATE` | Python | Do not patch the spin watchdog into the script before the first run |
+| `DEOB_NO_SERVE` | Python | Disable the long-lived serve harness (always re-run from scratch) |
+| `DEOB_NO_FETCH` | Python | Disable live constant fetching inside the serve harness |
+| `DEOB_SERVE_DIFF` | Python | Dump the served vs. run trace texts for comparison |
+
+## 5. Cross-Language Protocol Constants
+
+The harness protocol is shared by three languages: the Python core builds the
+harness file, the Node driver parses its output, and the Luau runtime
+(`runtime/envlog.luau`) prints it. All protocol constants live in
+**`protocol.json`** at the repo root:
+
+- chunk-key hash parameters (`h*31+b` over latin-1 bytes, 4096-byte stride and minimum length) used by `harness.chunk_key`, `harness.js chunkKey` and envlog's `srcKey`;
+- the per-run nonce length (`8` bytes, printed as 16 hex chars) that tags every `\0` protocol line;
+- heartbeat (2 s) and stall (20 s) watchdog timings;
+- the marker name list (`PROTOS`, `TRIGGER`, `CHUNK`, `ENVLOG-BEGIN`, ...).
+
+`runtime/envlog.luau` carries the same values baked into its `local PROTO = {...}`
+line (standalone Studio runs depend on them). Both harness builders overwrite
+that line from `protocol.json` on every run, and `test/protocol_test.py` fails
+CI when any copy drifts. If you change a protocol value, change it in
+`protocol.json` only.
+
+## 6. Testing & CI
+
+- `npm test` (or `python test/run_all.py`) runs the fast suite: unit tests for the Python core (chunk-key vectors, Luau pow semantics, config parsing, protocol nonce forging regression) plus the cross-language protocol consistency checks (spawns `node`, no Luau binaries needed).
+- `python test/run_all.py --golden` additionally re-runs the full pipeline on the benchmark samples and compares byte-for-byte with the committed reference outputs in `sample/output/` (needs `bin/luau` + `bin/luau-ast` from `python build_luau.py`). If a run differs, the reference file is restored and the test fails.
+- `.github/workflows/ci.yml` runs the fast suite on Ubuntu and Windows, syntax-checks every Python/JS file, and builds the patched Luau runtime (cached) for the golden regression.

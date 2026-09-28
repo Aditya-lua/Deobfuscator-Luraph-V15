@@ -130,6 +130,17 @@ node deob.js input.lua --detect
 > export PYTHON_BIN=python3   # Linux / macOS
 > ```
 
+### Development & Tests
+```bash
+# Fast test suite: unit tests + cross-language protocol consistency (no Luau build needed)
+npm test
+
+# Full regression: rebuild the pipeline for the benchmark samples and compare
+# byte-for-byte with the committed reference outputs (needs python build_luau.py first)
+python test/run_all.py --golden
+```
+Harness-protocol constants shared between the Python core, the Node driver and the Luau runtime live in `protocol.json`; `test/protocol_test.py` fails when any copy drifts. See [TECHNICAL.md](TECHNICAL.md) for the environment-variable reference and CI details.
+
 ---
 
 ## Performance

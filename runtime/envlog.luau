@@ -58,6 +58,13 @@ local HARNESS_SRC0 = debug.info(1, "s")
 -- embedded in the report (the drivers parse only nonce-tagged lines).
 local MARK = "\0" .. (__MARK or "")
 
+-- Protocol constants shared with the drivers (length_hash keys, see srcKey and
+-- the loadstring chunk gate below). The defaults here are overwritten from
+-- protocol.json by the harness builders on every run; keep them identical to
+-- it (test/protocol_test.py verifies, and standalone Studio runs rely on the
+-- baked-in values).
+local PROTO = { hash_mult = 31, hash_mod = 2147483648, hash_stride = 4096, chunk_min = 4096 }
+
 -- native mode: the harness runs inside Roblox itself (Studio). Pure engine
 -- objects then get a real twin, so values the engine computes (Path2D curve
 -- math, datatype arithmetic, ...) are bit-exact. Output is collected and
@@ -2395,9 +2402,9 @@ end
 local NEWCHUNKS = {}
 local function srcKey(src)
         local h = 0
-        for i = 1, #src, 4096 do
-                local bytes = { R.byte(src, i, math.min(i + 4095, #src)) }
-                for _, b in bytes do h = (h * 31 + b) % 2147483648 end
+        for i = 1, #src, PROTO.hash_stride do
+                local bytes = { R.byte(src, i, math.min(i + PROTO.hash_stride - 1, #src)) }
+                for _, b in bytes do h = (h * PROTO.hash_mult + b) % PROTO.hash_mod end
         end
         return #src .. "_" .. h
 end
@@ -2406,7 +2413,7 @@ E.loadstring = function(src, chunkname)
                 return exprP("loadstring(" .. tok(src) .. ")", "function")
         end
         local patched = nil
-        if R.type(src) == "string" and #src >= 4096 then
+        if R.type(src) == "string" and #src >= PROTO.chunk_min then
                 local key = srcKey(src)
                 patched = __CHUNKS and __CHUNKS[key]
                 if not patched and not NEWCHUNKS[key] then

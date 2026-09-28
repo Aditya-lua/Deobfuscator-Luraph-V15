@@ -179,66 +179,9 @@ def instrument(src, disp_index, probes, root=None, tmp_path=None):
         lines[l1] = s[:c1] + " " + code + " " + s[c1:]
     return "\n".join(lines)
 
-def instrument_post(src, disp_index, root, make_code, reg="Z", pc="W"):
-    """Append logging after simple `REG[..]=...` handlers. make_code(op, dest_expr) -> lua."""
-    import re as _re
-    lines = src.split("\n")
-    d = find_dispatchers(root)[disp_index - 1]
-    h = handler_map(d, lines)
-    inserts = []
-    for key, v in h.items():
-        blk = v["node"]
-        text = text_of(lines, blk)
-        if (pc + "=") in text.replace(pc + "==", "") or "return" in text or "break" in text \
-                or (pc + "+=") in text or (pc + "-=") in text:
-            continue
-        m = _re.match(r"\s*(" + reg + r"\[[A-Za-z_]+\[" + pc + r"\]\])=", text)
-        if not m:
-            continue
-        l1, c1, l2, c2 = loc(blk)
-        inserts.append((l2, c2, make_code(v["ops"][0], m.group(1))))
-    for l2, c2, code in sorted(inserts, reverse=True):
-        s = lines[l2]
-        lines[l2] = s[:c2] + " " + code + " " + s[c2:]
-    return "\n".join(lines)
-
 def loop_names(disp):
     """(register array, pc variable) used by a dispatch loop's handlers."""
     return ("Z", "W") if disp["pc"] == "W" else ("l", "O")
-
-def post_inserts(src_lines, disp, make_code):
-    import re as _re
-    reg, pc = loop_names(disp)
-    out = []
-    for v in handler_map(disp, src_lines).values():
-        text = text_of(src_lines, v["node"])
-        if (pc + "=") in text.replace(pc + "==", "") or "return" in text or "break" in text \
-                or (pc + "+=") in text or (pc + "-=") in text:
-            continue
-        m = _re.match(r"\s*(" + reg + r"\[[A-Za-z_]+\[" + pc + r"\]\])=", text)
-        if not m:
-            continue
-        l1, c1, l2, c2 = loc(v["node"])
-        out.append((l2, c2, make_code(v["ops"][0], m.group(1), pc)))
-    return out
-
-def instrument_everything(src, root, make_post, make_loop):
-    """Post-log simple handlers in every loop and log each dispatched instruction."""
-    import re as _re
-    lines = src.split("\n")
-    inserts = []
-    for d in find_dispatchers(root):
-        inserts += post_inserts(lines, d, make_post)
-    for l2, c2, code in sorted(inserts, reverse=True):
-        s = lines[l2]
-        lines[l2] = s[:c2] + " " + code + " " + s[c2:]
-    out = "\n".join(lines)
-    k = [0]
-
-    def rep(m):
-        k[0] += 1
-        return m.group(0) + make_loop(k[0], m.group(1), m.group(3))
-    return _re.sub(r"while true do (?:local )?([A-Za-z_]+)(?:,[A-Za-z_]+)*=([A-Za-z_]+)\[([A-Za-z_]+)\];", rep, out)
 
 def closure_entries(root):
     """For each VM interpreter closure: (line, col of its first statement, proto variable name)."""
@@ -262,40 +205,6 @@ def closure_entries(root):
                 walk(v, stack)
     walk(root, [])
     return [(l, c, name) for (l, c), name in seen.items()]
-
-def closure_makers(root):
-    """For each VM closure template: (line, col just after the statement that
-    stores the new closure in a local, that local's name, proto variable name).
-    Luraph builds every closure of a proto with `S, h = n, function(...) ... end`
-    inside a maker function whose second parameter is the proto."""
-    disp_nodes = [d["node"] for d in find_dispatchers(root)]
-    seen = {}
-
-    def walk(n, stack, stmts):
-        if isinstance(n, dict):
-            t = n.get("type")
-            if t == "AstExprFunction":
-                stack = stack + [n]
-            if t and t.startswith("AstStat"):
-                stmts = stmts + [(n, len(stack))]
-            if t == "AstStatWhile" and any(n is d for d in disp_nodes):
-                oi = max(i for i, f in enumerate(stack) if len(f["args"]) >= 2)
-                if oi + 1 < len(stack):
-                    clo = stack[oi + 1]
-                    st = [s for s, d in stmts if d == oi + 1]
-                    st = st[-1] if st else None
-                    if st and st["type"] == "AstStatAssign":
-                        for v, e in zip(st["vars"], st["values"]):
-                            if e is clo and local_name(v):
-                                _, _, l2, c2 = loc(st)
-                                seen[(l2, c2)] = (local_name(v), stack[oi]["args"][1]["name"])
-            for v in n.values():
-                walk(v, stack, stmts)
-        elif isinstance(n, list):
-            for v in n:
-                walk(v, stack, stmts)
-    walk(root, [], [])
-    return [(l, c, var, pv) for (l, c), (var, pv) in seen.items()]
 
 def decl_key(local):
     """Identity of a local: its declaration location."""

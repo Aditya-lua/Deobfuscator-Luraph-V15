@@ -790,12 +790,6 @@ def open_registers(blocks):
                 changed = True
     return inn
 
-def open_before(b, i, open_in):
-    cur = set(open_in)
-    for st in b.stmts[:i]:
-        open_step(st, b, cur)
-    return cur
-
 def copy_propagate(b, live_out, open_in=frozenset()):
     """`rX = rY` / `rX = constant` (Luraph moves values through scratch
     registers): use the source directly while neither is reassigned."""
@@ -1023,9 +1017,6 @@ def replace_temp(e, t, call):
             return TailRef(InlineTail(CallE(Global("select"), Multi([Const(x.tail.start)], InlineTail(call)))))
         return None
     return map_expr(e, fn)
-
-def expand_tail_items(items, t, call):
-    return [replace_temp(x, t, call) for x in items]
 
 def replace_temp_multi(m, t, call):
     items = [replace_temp(x, t, call) for x in m.items]
@@ -1655,7 +1646,7 @@ class Renderer:
         if isinstance(st, (CloseS, ForPrepS)):
             return []
         if type(st).__name__ == "DoBlock":
-            return [ind + "do"] + self.block(st.body, ind + "	") + [ind + "end"]
+            return [ind + "do"] + self.block(st.body, ind + "\t") + [ind + "end"]
         if isinstance(st, ST.SIf):
             return self.if_stmt(st, ind)
         if isinstance(st, ST.SLoop):

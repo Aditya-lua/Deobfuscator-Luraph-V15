@@ -3117,13 +3117,35 @@ E.toclipboard = function(...) return E.setclipboard(...) end
 E.fireproximityprompt = function(...) emit({ text = "fireproximityprompt(" .. fmtArgs(...) .. ")" }) end
 E.firetouchinterest = function(...) emit({ text = "firetouchinterest(" .. fmtArgs(...) .. ")" }) end
 E.fireclickdetector = function(...) emit({ text = "fireclickdetector(" .. fmtArgs(...) .. ")" }) end
-E.isfile = function(p) comment("isfile(" .. fmt(p) .. ") -> false"); return false end
-E.isfolder = function(p) comment("isfolder(" .. fmt(p) .. ") -> false"); return false end
-E.readfile = function(p) return callP("readfile(" .. fmt(p) .. ")", "contents", "string") end
+-- canned filesystem: CFG.readfile_map = { [path] = content } answers executor
+-- file reads exactly (Luarmor verifies its CDN cache with readfile() == fresh
+-- text; a proxy answer fails that check and kicks with a State code)
+E.isfile = function(p)
+        if CFG.readfile_map and CFG.readfile_map[p] then comment("isfile(" .. fmt(p) .. ") -> true"); return true end
+        comment("isfile(" .. fmt(p) .. ") -> false"); return false
+end
+E.isfolder = function(p)
+        if CFG.readfile_map then
+                for fp in R.next, CFG.readfile_map do
+                        if R.sub(fp, 1, #p + 1) == p .. "/" then
+                                comment("isfolder(" .. fmt(p) .. ") -> true"); return true
+                        end
+                end
+        end
+        comment("isfolder(" .. fmt(p) .. ") -> false"); return false
+end
+E.readfile = function(p)
+        if CFG.readfile_map and CFG.readfile_map[p] then
+                comment("readfile(" .. fmt(p) .. ") -> canned " .. #CFG.readfile_map[p] .. " bytes")
+                return CFG.readfile_map[p]
+        end
+        return callP("readfile(" .. fmt(p) .. ")", "contents", "string")
+end
 E.writefile = function(p, c) emit({ text = "writefile(" .. fmt(p) .. ", " .. fmt(c) .. ")" }) end
 E.appendfile = function(p, c) emit({ text = "appendfile(" .. fmt(p) .. ", " .. fmt(c) .. ")" }) end
 E.makefolder = function(p) emit({ text = "makefolder(" .. fmt(p) .. ")" }) end
 E.delfile = function(p) emit({ text = "delfile(" .. fmt(p) .. ")" }) end
+E.delfolder = function(p) emit({ text = "delfolder(" .. fmt(p) .. ")" }) end
 E.listfiles = function(p) return {} end
 E.getconnections = function(sig) return {} end
 E.gethui = function() return callP("gethui()", "hui") end
@@ -3147,6 +3169,10 @@ end
 E.request = httpRequest("request")
 E.http_request = httpRequest("http_request")
 E.http = { request = httpRequest("http.request") }
+-- Synapse-style surface: a real TABLE (type(syn)=="table" is an executor check;
+-- the ever-callable proxy is a function and fails it). Requests go through the
+-- same recorded path as request()/http_request().
+E.syn = { request = httpRequest("syn.request") }
 E.getrawmetatable = function(x)
         if GENVNAME[x] then return nil end
         if isP(x) then
@@ -4201,17 +4227,42 @@ CFUNCS[E.debug.info] = true
 
 -- anything else resolves to a named proxy so executor APIs etc. show up
 local unknownGlobals = {}
+-- globals the script itself assigned (any value). A key that was written and
+-- later nil'd must read back as nil (real Luau state), NOT as a proxy: Luarmor
+---style anti-dump consumes a handoff global (`_bsdata0 = nil`) before an inner
+-- VM chunk re-reads it, and a proxy there poisons the inner program.
+local SEEN_GLOBALS = {}
 R.setmetatable(ENV, {
         __index = function(_, k)
                 if R.type(k) ~= "string" then return nil end
                 -- a hash-like name (`_54776ae771af02794d46e80d`) is an obfuscator's
                 -- run-once/cache key, never an API: nil, as in a fresh Roblox state
                 if #k >= 12 and R.match(k, "^_*%x+$") and R.find(k, "%d") then return nil end
+                -- the script removed this global itself: nil, as a real env would
+                if SEEN_GLOBALS[k] then
+                        if CFG.trace_globals and (k == "_bsdata0" or k == "superflow_bytecode") then
+                                R.print("[global-read-nil]", k, debug.traceback())
+                        end
+                        return nil
+                end
                 local p = globalP(k, "function")
+                if CFG.trace_globals and (k == "_bsdata0" or k == "superflow_bytecode") then
+                        R.print("[global-proxy]", k, debug.info(2, "s"), debug.info(2, "l"),
+                                debug.info(2, "n"), debug.traceback())
+                end
                 if CFG.ptrace then R.print("[unknown-global]", k) end
                 remember(unknownGlobals, k)
                 R.rawset(ENV, k, p)
                 return p
+        end,
+        __newindex = function(_, k, v)
+                if R.type(k) == "string" then
+                        SEEN_GLOBALS[k] = true
+                        if CFG.trace_globals and (k == "_bsdata0" or k == "superflow_bytecode") then
+                                R.print("[global-write]", k, R.type(v), debug.traceback())
+                        end
+                end
+                R.rawset(ENV, k, v)
         end,
 })
 
@@ -4260,10 +4311,25 @@ end
 -- empty table whose metatable falls through to the globals; Luraph walks it.
 if not CFG.flat_env then
         local GLOBALS = ENV
-        ENV = R.setmetatable({ script = GLOBALS.script }, { __index = CFG.getlog and function(_, k)
-                R.print("[get]", k)
-                return GLOBALS[k]
-        end or GLOBALS })
+        ENV = R.setmetatable({ script = GLOBALS.script }, {
+                __index = CFG.getlog and function(_, k)
+                        R.print("[get]", k)
+                        return GLOBALS[k]
+                end or GLOBALS,
+                -- script globals land in this facade table, NOT in GLOBALS: track
+                -- them in SEEN_GLOBALS too, or a nil-out (`_bsdata0 = nil`) falls
+                -- through to GLOBALS where the key was never written and gets
+                -- answered by a proxy, poisoning inner VM chunks (Luarmor anti-dump)
+                __newindex = function(w, k, v)
+                        if R.type(k) == "string" then
+                                SEEN_GLOBALS[k] = true
+                                if CFG.trace_globals and (k == "_bsdata0" or k == "superflow_bytecode") then
+                                        R.print("[global-write]", k, R.type(v), debug.traceback())
+                                end
+                        end
+                        R.rawset(w, k, v)
+                end,
+        })
 end
 
 -- probe mode: log global reads and calls of the non-hot functions only

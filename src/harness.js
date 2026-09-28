@@ -40,7 +40,14 @@ function findLuau() {
 
 function luauAst() {
   const exe = process.platform === 'win32' ? 'luau-ast.exe' : 'luau-ast';
-  return path.join(BIN, exe);
+  const local = path.join(BIN, exe);
+  if (fs.existsSync(local)) return local;
+  const pathEnv = process.env.PATH || '';
+  for (const d of pathEnv.split(path.delimiter)) {
+    const p = path.join(d, exe);
+    if (fs.existsSync(p)) return p;
+  }
+  throw new Error('luau-ast not found: build it with `python build_luau.py` (needs git, cmake, a C++ compiler) or put it in ' + BIN);
 }
 
 function _downloadSync(url, dest) {

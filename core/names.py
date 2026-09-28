@@ -113,14 +113,16 @@ def dotted(e):
 class Namer:
     def __init__(self, text):
         import tempfile
+        import harness
         self.text = text
         with tempfile.NamedTemporaryFile("w", suffix=".luau", delete=False, encoding="utf-8", newline="\n") as f:
             f.write(text)
             path = f.name
-        BIN_DIR = os.path.join(HERE, "..", "bin") if os.path.exists(os.path.join(HERE, "..", "bin")) else os.path.join(HERE, "bin")
         try:
-            out = subprocess.run([os.path.join(BIN_DIR, "luau-ast.exe" if os.name == "nt" else "luau-ast"), path],
-                                 capture_output=True).stdout
+            r = harness.run_luau_ast(path)
+            if r.returncode != 0:
+                raise SyntaxError("not valid Luau: %s" % r.stderr.decode("latin-1").strip()[:500])
+            out = r.stdout
         finally:
             os.remove(path)
         self.root = json.loads(out.decode("latin-1"))["root"]
@@ -543,17 +545,26 @@ class Namer:
     def rewrite(self):
         lines = self.text.split("\n")
         edits = {}
+        total = skipped = 0
         for info in self.locals.values():
             if info["new"] == info["name"]:
                 continue
             for (a, b) in info["spans"]:
                 edits.setdefault(a[0], []).append((a[1], b[1], info["name"], info["new"]))
+                total += 1
         for ln, lst in edits.items():
-            s = lines[ln].encode("utf-8")       
+            s = lines[ln].encode("utf-8")
             for c0, c1, old, new in sorted(lst, reverse=True):
                 if s[c0:c1] == old.encode("utf-8"):
                     s = s[:c0] + new.encode("utf-8") + s[c1:]
+                else:
+                    # byte offsets drifted (e.g. an earlier edit on this line):
+                    # renaming only one half would leave an undefined global.
+                    skipped += 1
             lines[ln] = s.decode("utf-8")
+        if skipped:
+            print("[!] naming: %d/%d rename(s) skipped (source offset drift); "
+                  "affected locals keep their original names" % (skipped, total), file=sys.stderr)
         return "\n".join(lines)
 
 def rename_text(text):

@@ -215,3 +215,45 @@ about `luraph_runtime1` can be closed.
 
 No key is required at any point of the *bootstrap*; keys only matter at the
 client's `/auth/init` (§5), which requires a live executor session regardless.
+
+## 12. Live sandbox results (sephal init devirtualized)
+
+Stage 2 obtained from an executor cache (`init-f07dbcbe19a-sephal.lua`,
+764 KB, single line). Structure:
+
+- `superflow_bytecode` = 9,613-byte encrypted blob (plaintext data table).
+- Everything after it (~754 KB) is `return setmetatable({...},{}):TK()(...)`
+  — a **Luraph v15 chunk** (our detector: 0.80 shape match; handler table
+  `[80]=unpack, [32]=tonumber, [37]=buffer.writestring, [31]=bit32.bxor, …`,
+  letter-named superoperators, env-check closure returning three markers).
+
+Pipeline results on the extracted chunk:
+
+1. **Outer layer devirtualized** (`sephal_devirt.lua`): byte↔char decoder
+   build; `_bsdata0` validation (`not env["_bsdata0"]`, then
+   `type(_bsdata0) ~= "table"`); on success sets cache dir
+   `static_content_170926` + module id `f07dbcbe19a-sephal` and calls the
+   main bootstrap closure; on failure the direct-run Kick trap; 10 s watchdog
+   `spawn` + `while true do end` anti-tamper. The paste stub's `_bsdata0`
+   table is the bootstrap's entry ticket, as suspected.
+2. **With `_bsdata0` primed**, the trace enters the decrypted `superflow`
+   program: it begins with an executor-fingerprint canary (signal
+   connect/disconnect probes on DescendantRemoving, numeric-name
+   `WaitForChild`, GetService sweeps — same family as the §3 signature
+   canary). The run then fails with `attempt to index nil with 'sub'`:
+   the *inner* program's `getfenv()` resolves before the harness
+   materializes the script globals for that path (envlog trampoline
+   ordering). **Known harness gap**, candidate for a future wave: inner-VM
+   env resolution must see the stdlib fallthrough regardless of when the
+   inner program first calls `getfenv()`.
+
+Takeaway: Luarmor V4 is a Luraph-v15-virtualized bootstrap ("superflow")
+wrapped around an auth client, i.e. Luraph inside Luarmor inside Luraph.
+Our toolchain handles the outer two layers today; the innermost program
+needs the env-ordering fix above, after which the full superflow logic
+(cache encrypt/decrypt, client fetch/launch, `ce_like_loadstring_fn` +
+`luraph_runtime1` definition) is recoverable statically.
+
+No key is involved anywhere in this chain — analysis artifacts:
+`gdrive_in/Luarmor/stub/` (loader.lua, sephal_init.lua, sephal_vm_chunk.lua,
+sephal_primed2.lua, sephal_devirt.lua, traces).

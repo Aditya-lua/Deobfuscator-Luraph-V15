@@ -45,6 +45,13 @@ function parseArgs(argv) {
     else if (a === '--devirt-rounds') { args.devirtRounds = parseInt(argv[++i], 10); }
     else if (a === '--executor') { args.executor = argv[++i]; }
     else if (a === '--input-text') { args.inputText = argv[++i]; }
+    else if (a === '--cfg-json') {
+      // extra harness CFG as inline JSON or '@file.json' (e.g. readfile_map,
+      // http_map, real_json) -- merged into the cfg of every run
+      let spec = argv[++i];
+      if (spec.startsWith('@')) spec = fs.readFileSync(spec.slice(1), 'utf8');
+      args.cfgJson = JSON.parse(spec);
+    }
     else if (!a.startsWith('-')) { args.inputs.push(a); }
   }
 

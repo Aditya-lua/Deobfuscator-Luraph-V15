@@ -36,6 +36,170 @@ local R = {
         sub = string.sub, find = string.find, sort = table.sort,
         floor = math.floor, huge = math.huge, max = math.max,
 }
+-- real JSON for HttpService (CFG.real_json): a pure-Luau HttpService-style
+-- impl. Proxy answers poison scripts that parse server responses field by
+-- field; with the flag set, JSONEncode/JSONDecode run this impl instead.
+-- Lives on R (no extra top-level local: the chunk is at Luau's 200-local limit)
+R.json = (function()
+        local JSONESC = {['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t', ['\b'] = '\\b', ['\f'] = '\\f'}
+        local function encodeString(s)
+                return '"' .. string.gsub(s, '[%c"\\]', function(c)
+                        return JSONESC[c] or string.format("\\u%04x", string.byte(c))
+                end) .. '"'
+        end
+        local function encode(v, seen)
+                local t = type(v)
+                if v == nil then return "null" end
+                if t == "boolean" then return v and "true" or "false" end
+                if t == "number" then
+                        if v ~= v or v == math.huge or v == -math.huge then return "null" end
+                        if v == math.floor(v) and math.abs(v) < 2 ^ 53 then
+                                return string.format("%d", v)
+                        end
+                        return tostring(v)
+                end
+                if t == "string" then return encodeString(v) end
+                if t == "table" then
+                        if seen[v] then error("cannot encode recursive table", 2) end
+                        seen[v] = true
+                        local n = 0
+                        local isArr = true
+                        for k in pairs(v) do
+                                if type(k) ~= "number" or k % 1 ~= 0 or k < 1 then
+                                        isArr = false
+                                else
+                                        n = n + 1
+                                end
+                        end
+                        local parts = {}
+                        if isArr and n > 0 then
+                                for i = 1, n do
+                                        parts[i] = encode(v[i], seen)
+                                end
+                                seen[v] = nil
+                                return "[" .. table.concat(parts, ",") .. "]"
+                        end
+                        local keys = {}
+                        for k in pairs(v) do
+                                if type(k) == "string" or type(k) == "number" then
+                                        keys[#keys + 1] = k
+                                end
+                        end
+                        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+                        for i, k in ipairs(keys) do
+                                parts[i] = encodeString(tostring(k)) .. ":" .. encode(v[k], seen)
+                        end
+                        seen[v] = nil
+                        return "{" .. table.concat(parts, ",") .. "}"
+                end
+                error("cannot encode value of type " .. t, 2)
+        end
+        local function decode(s, pos)
+                pos = pos or 1
+                local function skipWs(p)
+                        while p <= #s do
+                                local c = string.sub(s, p, p)
+                                if c == " " or c == "\t" or c == "\n" or c == "\r" then p = p + 1 else break end
+                        end
+                        return p
+                end
+                local parseValue
+                local function parseString(p)
+                        p = p + 1
+                        local buf = {}
+                        while p <= #s do
+                                local c = string.sub(s, p, p)
+                                if c == '"' then
+                                        return table.concat(buf), p + 1
+                                elseif c == "\\" then
+                                        local e = string.sub(s, p + 1, p + 1)
+                                        if e == "u" then
+                                                local hex = string.sub(s, p + 2, p + 5)
+                                                local code = tonumber(hex, 16)
+                                                p = p + 6
+                                                if code < 0x80 then
+                                                        buf[#buf + 1] = string.char(code)
+                                                elseif code < 0x800 then
+                                                        buf[#buf + 1] = string.char(0xC0 + math.floor(code / 64), 0x80 + code % 64)
+                                                else
+                                                        buf[#buf + 1] = string.char(0xE0 + math.floor(code / 4096),
+                                                                0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+                                                end
+                                        else
+                                                local map = { n = "\n", t = "\t", r = "\r", b = "\b", f = "\f", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
+                                                buf[#buf + 1] = map[e] or e
+                                                p = p + 2
+                                        end
+                                else
+                                        buf[#buf + 1] = c
+                                        p = p + 1
+                                end
+                        end
+                        error("unterminated string", 0)
+                end
+                parseValue = function(p)
+                        p = skipWs(p)
+                        local c = string.sub(s, p, p)
+                        if c == '"' then
+                                return parseString(p)
+                        elseif c == "{" then
+                                local obj = {}
+                                p = skipWs(p + 1)
+                                if string.sub(s, p, p) == "}" then return obj, p + 1 end
+                                while true do
+                                        p = skipWs(p)
+                                        local k
+                                        k, p = parseString(p)
+                                        p = skipWs(p)
+                                        if string.sub(s, p, p) ~= ":" then error("expected :", 0) end
+                                        local v
+                                        v, p = parseValue(p + 1)
+                                        obj[k] = v
+                                        p = skipWs(p)
+                                        local d = string.sub(s, p, p)
+                                        if d == "," then p = p + 1
+                                        elseif d == "}" then return obj, p + 1
+                                        else error("expected , or }", 0) end
+                                end
+                        elseif c == "[" then
+                                local arr = {}
+                                p = skipWs(p + 1)
+                                if string.sub(s, p, p) == "]" then return arr, p + 1 end
+                                while true do
+                                        local v
+                                        v, p = parseValue(p)
+                                        arr[#arr + 1] = v
+                                        p = skipWs(p)
+                                        local d = string.sub(s, p, p)
+                                        if d == "," then p = p + 1
+                                        elseif d == "]" then return arr, p + 1
+                                        else error("expected , or ]", 0) end
+                                end
+                        elseif string.sub(s, p, p + 3) == "true" then
+                                return true, p + 4
+                        elseif string.sub(s, p, p + 4) == "false" then
+                                return false, p + 5
+                        elseif string.sub(s, p, p + 3) == "null" then
+                                return nil, p + 4
+                        else
+                                local num = string.match(s, "^%-?%d+%.?%d*[eE]?%+?%-?%d*", p)
+                                if not num or num == "" then
+                                        num = string.match(s, "^%-?%d+", p)
+                                end
+                                if num and num ~= "" then
+                                        return tonumber(num), p + #num
+                                end
+                                error("unexpected character at " .. p .. ": " .. string.sub(s, p, p + 10), 0)
+                        end
+                end
+                return parseValue(pos)
+        end
+        local function jd(s)
+                if type(s) == "buffer" then s = buffer.tostring(s) end
+                return decode(tostring(s))
+        end
+        return { encode = function(v) return encode(v, {}) end, decode = jd }
+end)()
 local REAL_G = R.getfenv(0)
 local HARNESS_SRC0 = debug.info(1, "s")
 
@@ -1560,6 +1724,47 @@ local function onCall(p, ...)
                 return {}
         end
 
+        -- CFG.real_json: real HttpService JSON (see R.json above); a failed
+        -- call falls through to the proxy answer
+        if CFG.real_json and (name == "JSONEncode" or name == "JSONDecode") then
+                local ok, out
+                if name == "JSONEncode" then
+                        ok, out = R.pcall(R.json.encode, args[1])
+                else
+                        ok, out = R.pcall(R.json.decode, a1)
+                end
+                if ok then
+                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
+                        return out
+                end
+        end
+        -- CFG.http_map: canned HTTP answers, keyed "METHOD <url>" or "<url>";
+        -- values { status = 200, body = "...", headers = {} } (headers optional).
+        -- A key ending in '*' matches any url with that prefix (requests whose
+        -- query carries a per-run nonce can still be answered)
+        if CFG.http_map and R.type(a1) == "string"
+                and (name == "HttpGet" or name == "HttpGetAsync" or name == "GetAsync" or name == "RequestAsync") then
+                local hit = CFG.http_map["GET " .. a1] or CFG.http_map[a1]
+                if hit == nil then
+                        for k, v in R.next, CFG.http_map do
+                                if R.type(k) == "string" and #k > 1 and R.sub(k, #k, #k) == "*" then
+                                        local pfx = R.sub(k, 1, #k - 1)
+                                        if R.sub(a1, 1, #pfx) == pfx or ("GET " .. a1):sub(1, #pfx) == pfx then
+                                                hit = v
+                                                break
+                                        end
+                                end
+                        end
+                end
+                if hit then
+                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
+                        comment(calleeText .. " -> canned " .. R.tostring(hit.status or 200)
+                                .. " (" .. R.tostring(#R.tostring(hit.body or "")) .. " bytes)")
+                        if name == "HttpGet" then return hit.body end
+                        return { Success = true, StatusCode = hit.status or 200,
+                                Headers = hit.headers or {}, Body = hit.body }
+                end
+        end
         if name == "HttpGet" or name == "HttpGetAsync" or name == "HttpPost" or name == "HttpPostAsync"
                 or name == "GetAsync" or name == "PostAsync" or name == "RequestAsync" then
                 if R.type(a1) == "string" then remember(urls, a1) end
@@ -2467,6 +2672,11 @@ end
 local function doWait(label, t)
         emit({ text = label .. "(" .. (t ~= nil and fmt(t) or "") .. ")" })
         onWait()
+        -- wait()'s second return is the clock: pin it too (a signature built
+        -- from wait() timestamps must be reproducible across runs)
+        if CFG.time_pin then
+                return (R.type(t) == "number" and t) or 0.03, (CFG.time_pin or 0) + (CFG.clock_pin or 0.125)
+        end
         return (R.type(t) == "number" and t) or 0.03, R.clock()
 end
 -- Errors are raised exactly like luaL_typeerror in a C function would
@@ -2554,9 +2764,47 @@ E.spawn = function(fn) return spawnLike("spawn", fn) end
 E.delay = function(t, fn)
         return E.task.delay(t, fn)
 end
-E.tick = function() return os.clock() + 1.7e9 end
-E.time = os.clock
-E.elapsedTime = os.clock
+if CFG.time_pin then
+        -- reproducible runs: scripts whose signatures/handshakes embed a clock
+        -- nonce (os.time/tick/os.clock) produce byte-identical output, so a
+        -- canned response encrypted for one run decrypts in the next
+        local tp = CFG.time_pin
+        E.os.time = function() return tp end
+        E.os.date = function(fmt, t) return os.date(fmt, tp) end
+        local cp = CFG.clock_pin or 0.125
+        E.os.clock = function() return cp end
+        E.tick = function() return tp + cp end
+        E.time = E.os.time
+        E.elapsedTime = E.os.clock
+        -- deterministic math.random (Park-Miller, seeded from the pin)
+        do
+                local st = (math.floor(tp) % 2147483646) + 1
+                E.math.random = function(a, b)
+                        st = (st * 48271) % 2147483647
+                        local v = st - 1
+                        if not a then return v / 2147483646 end
+                        if not b then return 1 + v % a end
+                        return a + v % (b - a + 1)
+                end
+        end
+        -- deterministic memory counters: signatures embed gcinfo() /
+        -- collectgarbage("count") values (process memory in bytes has a
+        -- stable top byte and jittering low bytes -- exactly the fingerprint
+        -- of a nonce that survives the server but not a replay)
+        do
+                local kb = CFG.gc_pin or 10000
+                E.gcinfo = function() return kb end
+                E.collectgarbage = function(opt)
+                        if opt == "count" then return kb end
+                        if opt == "mem" or opt == nil then return kb end
+                        return 0
+                end
+        end
+else
+        E.tick = function() return os.clock() + 1.7e9 end
+        E.time = os.clock
+        E.elapsedTime = os.clock
+end
 E.getgenv = function() return GENV end
 -- getrenv(): Roblox's own globals (libraries, game, datatypes), no executor
 -- functions; one table, built on first use (Script42 reads getrenv().math.random)
@@ -2901,7 +3149,9 @@ RANDOM_STATE = RSTATE
 local function newRandom(...)
         local seed = ...
         if seed == nil then
-                seed = R.floor(os.clock() * 1e6)
+                -- honor CFG.time_pin: an unseeded Random must not make otherwise
+                -- pinned runs diverge (its default seed was the real os.clock)
+                seed = CFG.time_pin and (CFG.time_pin % 1000003) or R.floor(os.clock() * 1e6)
         else
                 local n = R.tonumber(seed)
                 if R.type(seed) ~= "number" and not (R.type(seed) == "string" and n) then
@@ -3122,6 +3372,13 @@ E.fireclickdetector = function(...) emit({ text = "fireclickdetector(" .. fmtArg
 -- text; a proxy answer fails that check and kicks with a State code)
 E.isfile = function(p)
         if CFG.readfile_map and CFG.readfile_map[p] then comment("isfile(" .. fmt(p) .. ") -> true"); return true end
+        -- the .json cache probe is the last engine call before Luarmor's auth
+        -- signature is computed: arm the call-log probe here (the fingerprint
+        -- canaries that count stack frames have already run)
+        if CFG.call_log and R.type(p) == "string" and R.sub(p, 1, 20) == "static_content_17092"
+                and R.sub(p, #p - 4) == ".json" then
+                CHAIN.armCallLog()
+        end
         comment("isfile(" .. fmt(p) .. ") -> false"); return false
 end
 E.isfolder = function(p)
@@ -3137,6 +3394,12 @@ end
 E.readfile = function(p)
         if CFG.readfile_map and CFG.readfile_map[p] then
                 comment("readfile(" .. fmt(p) .. ") -> canned " .. #CFG.readfile_map[p] .. " bytes")
+                -- the cache-integrity read happens right before the auth
+                -- handshake: arm the call-log probe here (the fingerprint
+                -- canaries that count stack frames have already run)
+                if CFG.call_log and R.type(p) == "string" and R.sub(p, 1, 20) == "static_content_17092" then
+                        CHAIN.armCallLog()
+                end
                 return CFG.readfile_map[p]
         end
         return callP("readfile(" .. fmt(p) .. ")", "contents", "string")
@@ -3163,7 +3426,96 @@ local function httpRequest(label)
                         argError(1, R.match(label, "([%w_]+)$"), "table", ...)
                 end
                 if R.type(opts.Url) == "string" then remember(urls, opts.Url) end
+                -- CFG.http_map: canned responses for request()-style calls
+                -- (syn.request/request/http_request), same schema as HttpGet's
+                if CFG.http_map and R.type(opts.Url) == "string" then
+                        local method = R.tostring(opts.Method or opts.method or "GET"):upper()
+                        local hit = CFG.http_map[method .. " " .. opts.Url] or CFG.http_map[opts.Url]
+                        if hit == nil then
+                                for k, v in R.next, CFG.http_map do
+                                        if R.type(k) == "string" and #k > 1 and R.sub(k, #k, #k) == "*" then
+                                                local pfx = R.sub(k, 1, #k - 1)
+                                                if R.sub(opts.Url, 1, #pfx) == pfx
+                                                        or (method .. " " .. opts.Url):sub(1, #pfx) == pfx then
+                                                        hit = v
+                                                        break
+                                                end
+                                        end
+                                end
+                        end
+                        if hit then
+                                comment(label .. " -> canned " .. R.tostring(hit.status or 200)
+                                        .. " (" .. R.tostring(#R.tostring(hit.body or "")) .. " bytes)")
+                                if CFG.call_log then CHAIN.dumpCallLog() end
+                                return { Success = true, StatusCode = hit.status or 200,
+                                        Headers = hit.headers or {}, Body = hit.body }
+                        end
+                end
                 return callP(label .. "(" .. fmt(opts) .. ")", "response", "table")
+        end
+end
+
+-- CFG.call_log: record the script's last string/table/bit32/math calls in a
+-- ring; CHAIN.dumpCallLog() prints them (used at the first canned request) to
+-- show exactly what a request's signature was built from. The wrap is armed
+-- LAZILY (CHAIN.armCallLog) -- wrapping library functions adds stack frames,
+-- which stack-depth-sensitive code (fingerprint canaries) detects, so it must
+-- only happen after those checks have run.
+CHAIN.armCallLog = function() end
+if CFG.call_log then
+        local ring = {}
+        local rn = 0
+        local armed = false
+        local function push(s)
+                rn = rn + 1
+                ring[(rn - 1) % 4000] = s
+        end
+        local function summ(v)
+                local t = R.type(v)
+                if t == "string" then
+                        return "s" .. #v .. ":" .. R.gsub(R.sub(v, 1, 28), "%c", "?")
+                elseif t == "number" then
+                        return R.tostring(v)
+                end
+                return t
+        end
+        local function wraplib(name, lib)
+                if R.type(lib) ~= "table" then return end
+                local wrapped = {}
+                for fn, f in R.next, lib do
+                        if R.type(f) == "function" then
+                                wrapped[fn] = function(...)
+                                        local a, b, c = ...
+                                        push(name .. "." .. R.tostring(fn) .. "(" .. summ(a) .. ", " .. summ(b) .. ", " .. summ(c) .. ")")
+                                        return f(...)
+                                end
+                        else
+                                wrapped[fn] = f
+                        end
+                end
+                local ok = R.pcall(function()
+                        for k, v in R.next, wrapped do lib[k] = v end
+                end)
+                if not ok then
+                        -- readonly library (bit32): swap the env reference
+                        E[name] = wrapped
+                end
+        end
+        CHAIN.armCallLog = function()
+                if armed then return end
+                armed = true
+                wraplib("string", E.string)
+                wraplib("bit32", E.bit32)
+                wraplib("math", E.math)
+                wraplib("table", E.table)
+                if E.buffer then wraplib("buffer", E.buffer) end
+        end
+        CHAIN.dumpCallLog = function()
+                local start = rn - 4000
+                if start < 0 then start = 0 end
+                for i = start, rn - 1 do
+                        R.print("\1CALL\1" .. ring[i % 4000])
+                end
         end
 end
 E.request = httpRequest("request")

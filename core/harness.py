@@ -94,6 +94,11 @@ def lua_value(v):
         return "true" if v else "false"
     if isinstance(v, (list, tuple)):
         return "{" + ", ".join(lua_value(x) for x in v) + "}"
+    if isinstance(v, dict):
+        # plain-object CFG values (e.g. CFG.readfile_map): quoted keys, same
+        # shape as luaValue() in src/harness.js -- str(dict) would emit Python
+        # repr ('k': v) which is not valid Lua
+        return "{" + ", ".join("[%s] = %s" % (lua_value(k), lua_value(x)) for k, x in v.items()) + "}"
     if isinstance(v, str):
         return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r") + '"'
     return str(v)

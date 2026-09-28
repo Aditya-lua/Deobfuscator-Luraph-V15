@@ -434,8 +434,32 @@ during the run — every injected field (CFG.http_map, CHAIN fields, proxy
 upvalue stores behind them) reads back nil by request time, while fields
 present in phase 1 (CFG.readfile_map, time_pin) survive. A write-traceback
 watchdog on the injected map never fires: the wipe is not an assignment
-through the table. Next wave, two candidate paths: (a) extend the lift to the
-nested protos (force-decode for metatable-less tables) and read the response
-cipher + nonce derivation statically out of the recovered source; (b) run the
-phase-2 handshake through a channel the tamper whitelists (the readfile_map
-survives — e.g. serve the response through a fake cache-file read).
+through the table. Candidate paths: (a) extend the lift to the nested protos
+(force-decode for metatable-less tables) and read the response cipher + nonce
+derivation statically out of the recovered source; (b) run the phase-2
+handshake through a channel the tamper whitelists.
+
+### Path (b) WORKS: the readfile_map channel closes the loop
+
+The tamper's snapshot is **shallow for table fields**: `CFG.readfile_map`
+(the table) stays shared, so the handler can serve content planted in it, but
+keys *added after phase 1* are deleted by a key-diff restore — therefore the
+response key is **planted at build time** (`__lrm_session_response =
+"PENDING"`) and only its *value* is overwritten when phase 2 starts (serve
+"start" now accepts the raw body/JSON payload as its `req` argument).
+
+End-to-end result (tools/luarmor_two_phase.py, fresh loader): phase 1 builds
+b; the live handshake is ACCEPTED; the session response is planted; phase 2
+recomputes the identical b, the handler serves the real ~630-byte response
+via the readfile_map channel, the script JSON-decodes it and **runs the
+session decrypt in-sandbox** — then issues a SECOND handshake (protocol
+retry) and kicks. No State848, no harness crash on the first response.
+
+The remaining kick is by design, not a gap: the session response is keyed to
+the **real script key** (`LRM_SCRIPT_KEY` env for luarmor_two_phase.py);
+with the placeholder key the decrypted session is garbage, the bootstrap
+soft-fails, retries the handshake once and kicks. With a valid script key the
+same run loads the client chunk. Fixed en route: the runtime require rejects
+long-bracket modules that luau-ast accepts (resp modules use quoted+escaped
+strings), and the syn.request handler guards userdata Urls before
+string-matching.

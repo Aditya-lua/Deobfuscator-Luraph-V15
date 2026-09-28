@@ -1,5 +1,6 @@
 # Luraph v15 Deobfuscator
 
+[![CI](https://github.com/Aditya-lua/Deobfuscator-Luraph-V15/actions/workflows/ci.yml/badge.svg)](https://github.com/Aditya-lua/Deobfuscator-Luraph-V15/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
 [![Target](https://img.shields.io/badge/Target-Luraph%20v15-red.svg)](https://lura.ph/)
@@ -86,19 +87,24 @@ The deobfuscator operates across 5 stages:
 - **Fast-Path Engine**: Skips redundant verification passes once all constants are decoded live.
 - **Offline Roblox Sandbox**: Includes offline models for Roblox services, `Path2D`, `UDim2`, `Vector3`, `CFrame`, and executor globals. No Roblox client needed.
 - **Self-Contained**: Luau binaries, runtime emulators, and analysis modules are bundled directly inside this repository.
+- **Fail-Loud Error Handling**: Per-function error isolation during devirtualization — a function that cannot be lifted becomes an explicit `error("...")` stub with a report instead of crashing the whole run or silently emitting wrong code. Unknown control-flow blocks raise a loud `SError` rather than being guessed.
+- **Hardened Instrumentation Sandbox**: The live Luau probe runs behind a `getfenv`/`loadstring` shield with a per-run nonce protocol, so protected scripts cannot spoof or tamper with the telemetry the lifter relies on. Subprocesses are hard-timeout guarded on every platform.
+- **Cross-Platform**: Windows and Linux out of the box, verified by CI on both operating systems.
+- **Tested & CI-Verified**: A fast unit + cross-language protocol suite (`npm test`) plus a byte-for-byte golden regression against committed reference outputs run automatically on every push via GitHub Actions.
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
+- **OS**: Windows or Linux (the CI suite runs on both)
 - **Node.js**: v18.0.0 or higher
 - **Python**: 3.10 or higher (powers the backend symbolic execution engine)
 
 ### Installation
 Clone the repository and install dependencies:
 ```bash
-git clone https://github.com/caomod2077/Deobfuscator-Luraph-V15.git
+git clone https://github.com/Aditya-lua/Deobfuscator-Luraph-V15.git
 cd Deobfuscator-Luraph-V15
 npm install
 ```
@@ -141,11 +147,13 @@ python test/run_all.py --golden
 ```
 Harness-protocol constants shared between the Python core, the Node driver and the Luau runtime live in `protocol.json`; `test/protocol_test.py` fails when any copy drifts. See [TECHNICAL.md](TECHNICAL.md) for the environment-variable reference and CI details.
 
+CI (`.github/workflows/ci.yml`) runs the fast suite on Ubuntu **and** Windows on every push, then builds the patched Luau runtime (with binary caching) and runs the full golden regression on Ubuntu — so the committed reference outputs can never silently rot.
+
 ---
 
 ## Performance
 
-The engine has been heavily optimized (symbolic AST caching, iterative tree walks, single-pass state analysis, shared dispatch-loop cache, and a bounded SCCP walk). Measured on the bundled `sample/` scripts, the current build is **1.6x to 1.8x faster** than the previous release, and scripts that previously crashed now lift completely:
+The engine has been heavily optimized (symbolic AST caching, iterative tree walks, single-pass state analysis, shared dispatch-loop cache, and a bounded SCCP walk). Measured on the bundled `sample/` scripts, the current build is **1.6x to 1.8x faster** than the previous release, and scripts that previously crashed now lift completely. A subsequent profile-driven pass over the hot paths added another **~25% end-to-end** speedup on top of the numbers below:
 
 | Benchmark | Size | Functions | Before | After | Speedup |
 |---|---|---|---|---|---|

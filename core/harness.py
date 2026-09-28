@@ -24,11 +24,11 @@ def find_luau():
         if os.path.exists(p):
             return p
     if os.name != "nt":
-        sys.exit("luau not found: build it with `python deobf/build_luau.py` (needs git, cmake, a C++ "
+        sys.exit("luau not found: build it with `python build_luau.py` (needs git, cmake, a C++ "
                  "compiler) or put one in " + BIN)
     print("[*] downloading Luau runtime...", file=sys.stderr)
     print("[!] stock Luau lacks the Vector3 members (v:Dot, v.Magnitude, ...): build the patched "
-          "runtime with `python deobf/build_luau.py`", file=sys.stderr)
+          "runtime with `python build_luau.py`", file=sys.stderr)
     os.makedirs(BIN, exist_ok=True)
     zpath = os.path.join(BIN, "luau.zip")
     urllib.request.urlretrieve(LUAU_URL, zpath)
@@ -41,6 +41,29 @@ def find_luau():
 def luau_ast():
     """Path of luau-ast (prints a file's AST as JSON; decode it as latin-1)."""
     return os.path.join(BIN, "luau-ast.exe" if os.name == "nt" else "luau-ast")
+
+AST_TIMEOUT = 120  # seconds; 1.7 MB scripts parse in seconds, this only guards a hung binary
+
+def run_luau_ast(path):
+    """Run luau-ast on `path`; CompletedProcess with .returncode/.stdout/.stderr.
+    Raises RuntimeError with an actionable message when the binary is missing
+    or hangs (previously: ENOENT surfaced as a confusing parse error, and a
+    hung parse blocked the pipeline forever)."""
+    exe = luau_ast()
+    if not os.path.exists(exe):
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            cand = os.path.join(d, "luau-ast.exe" if os.name == "nt" else "luau-ast")
+            if os.path.exists(cand):
+                exe = cand
+                break
+        else:
+            raise RuntimeError("luau-ast not found: build it with `python build_luau.py`"
+                               " (needs git, cmake, a C++ compiler) or put it in " + BIN)
+    try:
+        return subprocess.run([exe, path], capture_output=True, timeout=AST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("luau-ast timed out after %ss on %s (binary hung or machine overloaded)"
+                           % (AST_TIMEOUT, path))
 
 def long_string(s):
     level = 0
@@ -377,22 +400,22 @@ local base = "http://127.0.0.1:%d"
 local was = HS.HttpEnabled
 HS.HttpEnabled = true
 local ok0, err0 = pcall(function()
-	while true do
-		local src = HS:GetAsync(base .. "/harness", true)
-		if src == "" then break end
-		HS.HttpEnabled = false
-		local f, err = loadstring(src, "=harness")
-		local ok, out = false, err
-		if f then ok, out = pcall(f) end
-		HS.HttpEnabled = true
-		out = ok and tostring(out) or ("\0ENVLOG-FAIL\n" .. tostring(out))
-		-- HttpService posts are limited to 1 MB: send in parts
-		local n = math.max(1, math.ceil(#out / 900000))
-		for i = 1, n do
-			HS:PostAsync(base .. "/result?part=" .. i .. "&of=" .. n, string.sub(out, (i - 1) * 900000 + 1, i * 900000),
-				Enum.HttpContentType.TextPlain)
-		end
-	end
+        while true do
+                local src = HS:GetAsync(base .. "/harness", true)
+                if src == "" then break end
+                HS.HttpEnabled = false
+                local f, err = loadstring(src, "=harness")
+                local ok, out = false, err
+                if f then ok, out = pcall(f) end
+                HS.HttpEnabled = true
+                out = ok and tostring(out) or ("\0ENVLOG-FAIL\n" .. tostring(out))
+                -- HttpService posts are limited to 1 MB: send in parts
+                local n = math.max(1, math.ceil(#out / 900000))
+                for i = 1, n do
+                        HS:PostAsync(base .. "/result?part=" .. i .. "&of=" .. n, string.sub(out, (i - 1) * 900000 + 1, i * 900000),
+                                Enum.HttpContentType.TextPlain)
+                end
+        end
 end)
 HS.HttpEnabled = was
 return ok0 and "deobf: done" or ("deobf loader error: " .. tostring(err0))

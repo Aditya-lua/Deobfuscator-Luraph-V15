@@ -15,13 +15,15 @@ UNOPS = {"Not": "not ", "Minus": "-", "Len": "#"}
 
 def parse(text):
     """AST dict of Luau source `text` (latin-1 str)."""
+    import harness
     fd, path = tempfile.mkstemp(suffix=".lua")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(text.encode("latin-1"))
-        BIN_DIR = os.path.join(HERE, "..", "bin") if os.path.exists(os.path.join(HERE, "..", "bin")) else os.path.join(HERE, "bin")
-        out = subprocess.run([os.path.join(BIN_DIR, "luau-ast.exe" if os.name == "nt" else "luau-ast"), path],
-                             capture_output=True, check=True).stdout
+        r = harness.run_luau_ast(path)
+        if r.returncode != 0:
+            raise SyntaxError("not valid Luau: %s" % r.stderr.decode("latin-1").strip()[:500])
+        out = r.stdout
     finally:
         os.remove(path)
     return json.loads(out.decode("latin-1"))["root"]

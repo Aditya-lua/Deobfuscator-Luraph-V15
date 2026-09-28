@@ -8,8 +8,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 BIN_DIR = os.path.join(ROOT, "..", "bin") if os.path.exists(os.path.join(ROOT, "..", "bin")) else os.path.join(ROOT, "bin")
 
 def load_ast(path):
-    exe = os.path.join(BIN_DIR, "luau-ast.exe" if os.name == "nt" else "luau-ast")
-    r = subprocess.run([exe, path], capture_output=True)
+    import harness
+    r = harness.run_luau_ast(path)
     errs = r.stderr.decode("latin-1").strip().splitlines()
     if r.returncode != 0 or (errs and errs[0].startswith("Parse errors")):
         raise SyntaxError("not valid Luau (%s)" % (errs[1].strip() if len(errs) > 1 else "luau-ast exit %#x"

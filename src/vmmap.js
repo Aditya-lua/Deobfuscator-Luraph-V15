@@ -4,12 +4,25 @@ const { execFileSync } = require('child_process');
 const { luauAst } = require('./harness');
 const fs = require('fs');
 
+const AST_TIMEOUT_MS = 120 * 1000; // 1.7 MB scripts parse in seconds; guards a hung/broken binary
+
 function loadAst(filePath) {
-  const exe = luauAst();
+  let exe;
+  try {
+    exe = luauAst();
+  } catch (e) {
+    throw new SyntaxError(e.message);
+  }
   let stdout;
   try {
-    stdout = execFileSync(exe, [filePath], { encoding: 'latin1', maxBuffer: 256 * 1024 * 1024 });
+    stdout = execFileSync(exe, [filePath], { encoding: 'latin1', maxBuffer: 256 * 1024 * 1024, timeout: AST_TIMEOUT_MS });
   } catch (e) {
+    if (e.code === 'ENOENT' || /spawnSync.*ENOENT/.test(e.message || '')) {
+      throw new SyntaxError(e.message.replace(/spawnSync .* ENOENT/, 'luau-ast binary is missing or not executable'));
+    }
+    if (e.code === 'ETIMEDOUT' || (e.message || '').includes('ETIMEDOUT')) {
+      throw new SyntaxError(`luau-ast timed out after ${AST_TIMEOUT_MS / 1000}s (binary hung or machine overloaded)`);
+    }
     const msg = e.stderr || e.message || '';
     throw new SyntaxError('not valid Luau: ' + msg.trim().split('\n').slice(0, 3).join(' | '));
   }

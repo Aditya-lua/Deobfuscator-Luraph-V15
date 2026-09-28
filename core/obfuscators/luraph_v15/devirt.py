@@ -3101,6 +3101,21 @@ class FunctionLifter:
                 params = self.params
             except Unsupported as ex:
                 lines = ["error(\"devirt: could not lift closure: %s\")" % str(ex).replace("\"", "'")]
+                params = ["..."]
+            except Exception as ex:
+                # one broken function must not abort the whole 1000-function run:
+                # mark it explicitly and keep lifting the rest (same convention
+                # as the "unexplored successor" markers).
+                pid = self.prog.dump.pid_of_table.get(proto.tid)
+                print("[!] lifting closure %s failed: %s: %s (stubbed with an error marker)"
+                      % ("#%s" % pid if pid is not None else "t%s" % proto.tid,
+                         type(ex).__name__, ex), file=sys.stderr)
+                if os.environ.get("DEVIRT_TB"):
+                    import traceback
+                    traceback.print_exc()
+                lines = ["error(\"devirt: could not lift closure: %s: %s\")"
+                         % (type(ex).__name__, str(ex).replace("\"", "'"))]
+                params = ["..."]
             memo[ckey] = (lines, params)
         self.lifted.discard(id(proto))
         f = CG.FuncE(["function(%s)" % ", ".join(params)] + ["\t" + l for l in lines] + ["end"])

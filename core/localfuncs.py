@@ -1,18 +1,22 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN_DIR = os.path.join(HERE, "..", "bin") if os.path.exists(os.path.join(HERE, "..", "bin")) else os.path.join(HERE, "bin")
+
 
 def _ast(text):
+    import harness
     with tempfile.NamedTemporaryFile("w", suffix=".luau", delete=False, encoding="utf-8", newline="\n") as f:
         f.write(text)
         path = f.name
     try:
-        out = subprocess.run([os.path.join(BIN_DIR, "luau-ast.exe" if os.name == "nt" else "luau-ast"), path],
-                             capture_output=True).stdout
+        r = harness.run_luau_ast(path)
+        if r.returncode != 0:
+            raise SyntaxError("not valid Luau: %s" % r.stderr.decode("latin-1").strip()[:500])
+        out = r.stdout
     finally:
         os.remove(path)
     return json.loads(out.decode("latin-1"))["root"]
@@ -47,11 +51,16 @@ def rewrite(text):
 
     _walk(root, visit)
     lines = text.split("\n")
+    fixed = 0
     for l, c, name in hits:
-        s = lines[l].encode("utf-8")        
+        s = lines[l].encode("utf-8")
         head = ("local %s = function(" % name).encode("utf-8")
         if s[c:c + len(head)] == head:
             lines[l] = (s[:c] + ("local function %s(" % name).encode("utf-8") + s[c + len(head):]).decode("utf-8")
+            fixed += 1
+    if len(hits) > fixed:
+        print("[!] local function pass: %d of %d candidate(s) skipped (source offset drift)"
+              % (len(hits) - fixed, len(hits)), file=sys.stderr)
     return "\n".join(lines)
 
 if __name__ == "__main__":

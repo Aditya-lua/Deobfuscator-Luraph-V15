@@ -58,7 +58,9 @@ class LuaFunc:
 def norm_key(k):
     if type(k) is int or type(k) is bytes:
         return k
-    if isinstance(k, float) and k == int(k) and not math.isinf(k):
+    # isfinite must come first: int(float("inf")) raises OverflowError and
+    # int(float("nan")) raises ValueError, and inf/nan are legal Lua keys.
+    if isinstance(k, float) and math.isfinite(k) and k == int(k):
         return int(k)
     if isinstance(k, Expr):
         raise Unsupported("symbolic table key on a concrete table: %r" % (k,))
@@ -263,6 +265,31 @@ def fix_int(x):
         return int(x)
     return x
 
+def _pow(a, b):
+    """C pow() semantics (what Luau's ^ uses). Python's ** differs exactly
+    where it matters here: 0^-n raises ZeroDivisionError instead of giving
+    inf, a negative base with a fractional exponent returns complex instead
+    of nan, and overflow raises OverflowError instead of saturating to inf."""
+    if a == 0 and b < 0:
+        # pow(+-0, -odd) = -+inf, pow(+-0, -even or -fractional) = +inf
+        if math.copysign(1.0, a) < 0 and b % 2 == 1:
+            return float("-inf")
+        return float("inf")
+    if a < 0 and math.isfinite(b) and b != math.floor(b):
+        # math.floor would raise OverflowError on +-inf (legal Lua exponents)
+        return float("nan")
+    try:
+        r = float(a) ** float(b)
+    except OverflowError:
+        # only reachable with an integral b (fractional negative base returned
+        # nan above): sign follows the parity of the exponent
+        return float("-inf") if (a < 0 and b % 2 == 1) else float("inf")
+    except ZeroDivisionError:  # defensive; a == 0 handled above
+        return float("inf")
+    if isinstance(r, complex):  # defensive; should be unreachable
+        return float("nan")
+    return r
+
 def arith(op, a, b):
     if op == "Add":
         return fix_int(a + b)
@@ -290,7 +317,7 @@ def arith(op, a, b):
             r += b
         return fix_int(r)
     if op == "Pow":
-        return fix_int(float(a) ** float(b))
+        return fix_int(_pow(float(a), float(b)))
     raise Unsupported(op)
 
 def u32(x):

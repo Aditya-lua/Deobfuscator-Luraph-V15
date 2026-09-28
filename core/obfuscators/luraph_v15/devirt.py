@@ -12,6 +12,7 @@ if ROOT not in sys.path:
 
 from obfuscators.luraph_v15 import vmmap  
 import backend  
+import harness  
 import luasym as S  
 from luasym import (LTable, Builtin, LuaFunc, Buf, Unsupported, Expr, Const, Reg, Pseudo, Global,  
                     Upval, Index, Bin, Un, IfExp, TempVal, Vararg, ClosureExpr, Multi, TempTail,
@@ -2651,10 +2652,7 @@ def build_tree(paths, d, start):
 
 def chunk_key(src):
     """Same key as deob.chunk_key / srcKey() in envlog.luau (the __maker tag prefix)."""
-    h = 0
-    for b in src.encode("latin-1"):
-        h = (h * 31 + b) % 2147483648
-    return "%d_%d" % (len(src), h)
+    return harness.chunk_key(src)
 
 _SOURCE_CACHE = {}      
 
@@ -3150,61 +3148,6 @@ def stmt_exprs(st):
         out.append(st.tbl)
         out += list(st.values.items)
     return out
-
-def collect_regs(body):
-    import codegen as CG
-    import structure as ST
-    regs = set()
-
-    def ex(e):
-        if e is None:
-            return
-        for x in CG.walk(e):
-            if isinstance(x, Reg):
-                regs.add(x.n)
-
-    def multi(m):
-        if m is None:
-            return
-        for x in m.items:
-            ex(x)
-        if m.tail is not None:
-            ex(CG.TailRef(m.tail))
-
-    def blk(stmts):
-        for s_ in stmts:
-            if isinstance(s_, CG.AssignS):
-                for t in s_.targets:
-                    ex(t)
-                multi(s_.values)
-            elif isinstance(s_, (CG.CallS, CG.TempDef)):
-                ex(s_.call)
-            elif isinstance(s_, CG.SetListS):
-                ex(s_.tbl)
-                multi(s_.values)
-            elif isinstance(s_, ST.SIf):
-                ex(s_.cond)
-                blk(s_.then)
-                blk(s_.els)
-            elif isinstance(s_, ST.SLoop):
-                blk(s_.body)
-                ex(s_.cond)
-                if s_.kind == "for":
-                    regs.add(s_.forinfo[0])
-                    for x in s_.forinfo[1]:
-                        ex(x)
-                elif s_.kind == "forin":
-                    regs.update(s_.forinfo[0])
-                    for x in s_.forinfo[1]:
-                        ex(x)
-            elif isinstance(s_, ST.SReturn):
-                multi(s_.values)
-    blk(body)
-    return regs
-
-def refine_loops(body):
-    """Placeholder: loop shapes (for / while cond) are recognized later."""
-    return body
 
 def _vm_roots(prog):
     """[(maker tag, [(seq, pid, cap), ...] sorted)] with the payload VM last, and its tag."""

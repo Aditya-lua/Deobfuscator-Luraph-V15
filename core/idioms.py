@@ -151,18 +151,6 @@ def name_counts(stmts, reads=None, writes=None, text=None):
         name_counts._re = re
     return reads, writes, text
 
-def _first_leaf(e):
-    """The sub-expression Luau evaluates first."""
-    while True:
-        if isinstance(e, (Bin, Un)):
-            e = e.a
-        elif isinstance(e, CG.Index):
-            e = e.obj
-        elif isinstance(e, CG.CallE):
-            e = e.fn
-        else:
-            return e
-
 def _positions(body):
     """Pre-order numbering of the statements: id -> [index, last index of its
     subtree, the block holding it, the statement holding that block], plus

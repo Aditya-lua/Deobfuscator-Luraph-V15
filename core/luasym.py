@@ -238,9 +238,6 @@ class YieldSig(Exception):
     def __init__(self, node):
         self.node = node
 
-class NeedDecision(Exception):
-    pass
-
 def truthy(v):
     return not (v is None or v is False)
 

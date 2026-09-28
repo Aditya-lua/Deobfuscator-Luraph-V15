@@ -151,6 +151,57 @@ CI (`.github/workflows/ci.yml`) runs the fast suite on Ubuntu **and** Windows on
 
 ---
 
+## FlowAuth Crack (`flowauth_crack/`)
+
+A toolkit — built while cracking the **FlowAuth** loader chain (as used by the `ps2` entry of the Ouroboros repo) — that turns the devirtualizer's sandbox into a full **live loader emulator**: the protected script believes it is running inside a real executor with real crypto, a real device ID and a real HTTP stack.
+
+### How the chain works
+
+```
+ps2.luau (stub) ──► flowauth.net loader ──► Luraph v15 bootstrapper
+                    │ dec URL (decimal-escaped)      (586 KB, pinned sha256 URL,
+                    │ Adler-32 checksum over body     IP fallback + ?retry= hex)
+                    │ _bsdata0 handoff blob ──► bootstrapper decrypts & runs
+                    ▼
+        /v1/auth/script  ◄── auth-proof (19-part netstring, sha256) + challenge
+```
+
+`flowauth_crack/` closes every gap the sandbox had for that chain:
+
+| Shim | Purpose |
+|---|---|
+| Pure-Luau **SHA-256** (`sha256.luau`) | FlowAuth's native-crypto precheck (`hash`/`digest`/`crypto.sha256`/`crypt.sha256` executor globals) |
+| **base64** (`base64.luau`) | `base64decode`/`base64encode` under all common executor names |
+| **JSON** (`json.luau`) | Real `HttpService:JSONEncode/JSONDecode` (the sandbox default answers a proxy) |
+| Device identity | Stable `RbxAnalyticsService:GetClientId()`, `gethwid`, v4-format `GenerateGUID` |
+| Game identity | `GameId` / `PlaceId` / `CreatorId` / `CreatorType` answered from configurable values |
+| `_bsdata0` handoff | Extracted from a fresh loader and pre-seeded into the sandbox globals |
+| HTTP stack | `request`/`http_request`/`http.request`/`syn.request` answered from a canned map; unknown requests are leaked into the trace (`\x01SUPERZREQ\x01` marker + `superz.leak/...` probe) so the driver can replay them for real |
+
+### Usage
+
+```bash
+# 1. run the automated live chain (fetches a fresh loader, patches the sandbox,
+#    runs the bootstrapper, replays every HTTP hop against flowauth.net live,
+#    captures loadstring'd chunks):
+python3 flowauth_crack/flowauth_chain.py 8 --boot /path/to/bootstrapper.lua
+
+# 2. or patch the sandbox manually (idempotent, keeps envlog.luau.orig backup):
+python3 flowauth_crack/patch_envlog.py --loader flowauth_crack/work/loader.lua \
+                                        --canned flowauth_crack/work/canned.json
+```
+
+Work products land in `flowauth_crack/work/`: `loader.lua` (fresh loader), `canned.json` (replayed live responses), `chunks/` (captured payloads).
+
+> **Note:** loaders are regenerated per fetch and the handoff is session-bound — stale `_bsdata0` gets rejected with `launch_ticket_rejected`. Always pull a fresh loader per run (the chain driver does this automatically).
+
+### Findings (ps2 / Ouroboros, Sep 2025)
+
+- The loader chain is fully crackable client-side: fresh loader → sandbox run → auth-proof → challenge `200 OK`.
+- The upstream `/v1/auth/script` endpoint answers `404 no_script_for_game` for every game identity tried (place IDs, universe IDs, live PS99) — **the FlowAuth entry for this loader is dead server-side**, so even real executors get nothing. The last real payload was recovered from git history instead.
+
+---
+
 ## Performance
 
 The engine has been heavily optimized (symbolic AST caching, iterative tree walks, single-pass state analysis, shared dispatch-loop cache, and a bounded SCCP walk). Measured on the bundled `sample/` scripts, the current build is **1.6x to 1.8x faster** than the previous release, and scripts that previously crashed now lift completely. A subsequent profile-driven pass over the hot paths added another **~25% end-to-end** speedup on top of the numbers below:

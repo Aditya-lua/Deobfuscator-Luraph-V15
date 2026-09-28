@@ -170,7 +170,14 @@ async function processFile(absInput, args) {
     job.sourcePath = sourcePath;
 
     let result;
-    if (plugin.name === 'luraph_v15') {
+    if (plugin.name === 'luarmor_client') {
+      // Auth-gated loader: control flow is not virtualized, but tracing deadlocks
+      // on wall-clock anti-tamper (docs/LUARMOR_NOTES.md §4, §8). Route instead.
+      throw new Error(
+        'Luarmor whitelist client detected — devirtualization/tracing not applicable. ' +
+        'Use tools/luarmor_probe.py to classify and split loader vs payload.'
+      );
+    } else if (plugin.name === 'luraph_v15') {
       result = await driver.run(job);
     } else {
       result = await driver.runGeneric(job);

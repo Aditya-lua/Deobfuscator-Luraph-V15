@@ -97,6 +97,8 @@ function luaValue(v) {
   if (typeof v === 'string')
     return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
   if (v === null || v === undefined) return 'nil';
+  if (typeof v === 'object')
+    return '{' + Object.entries(v).map(([k, val]) => `[${luaValue(k)}] = ${luaValue(val)}`).join(', ') + '}';
   return String(v);
 }
 

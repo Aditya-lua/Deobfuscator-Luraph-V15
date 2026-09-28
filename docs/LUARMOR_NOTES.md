@@ -216,44 +216,106 @@ about `luraph_runtime1` can be closed.
 No key is required at any point of the *bootstrap*; keys only matter at the
 client's `/auth/init` (§5), which requires a live executor session regardless.
 
-## 12. Live sandbox results (sephal init devirtualized)
+## 12. Live sandbox results (sephal init, corrected + completed)
 
 Stage 2 obtained from an executor cache (`init-f07dbcbe19a-sephal.lua`,
-764 KB, single line). Structure:
+764 KB). File layout (all on one line after a 197-byte header comment):
 
-- `superflow_bytecode` = 9,613-byte encrypted blob (plaintext data table).
-- Everything after it (~754 KB) is `return setmetatable({...},{}):TK()(...)`
-  — a **Luraph v15 chunk** (our detector: 0.80 shape match; handler table
-  `[80]=unpack, [32]=tonumber, [37]=buffer.writestring, [31]=bit32.bxor, …`,
-  letter-named superoperators, env-check closure returning three markers).
+1. `superflow_bytecode={"\136\221..."}` — 9.6 KB encrypted blob **as a
+   global table assignment**. Its last element embeds a runtime concat with
+   `_bsdata0[10]` — i.e. the blob table itself is keyed to the stub's
+   handoff and the assignment order matters: `_bsdata0` must exist BEFORE
+   the blob line executes.
+2. `return setmetatable({[80]=unpack,[32]=tonumber,[31]=bit32.bxor,…},{}):TK()(…)`
+   — a **Luraph v15 chunk** (detector: 0.80; letter-named superoperators,
+   env-check closure returning `f2e2960fc4e18e910dcba7, "fa6607",
+   e165cabf1c2f2445e90a9c`). It decrypts and interprets the blob.
 
-Pipeline results on the extracted chunk:
+**Correction of the earlier (Sep 28) diagnosis:** the "env-materialization
+ordering" theory was wrong. The real causes of the `attempt to index nil
+with 'sub'` crash, in order:
 
-1. **Outer layer devirtualized** (`sephal_devirt.lua`): byte↔char decoder
-   build; `_bsdata0` validation (`not env["_bsdata0"]`, then
-   `type(_bsdata0) ~= "table"`); on success sets cache dir
-   `static_content_170926` + module id `f07dbcbe19a-sephal` and calls the
-   main bootstrap closure; on failure the direct-run Kick trap; 10 s watchdog
-   `spawn` + `while true do end` anti-tamper. The paste stub's `_bsdata0`
-   table is the bootstrap's entry ticket, as suspected.
-2. **With `_bsdata0` primed**, the trace enters the decrypted `superflow`
-   program: it begins with an executor-fingerprint canary (signal
-   connect/disconnect probes on DescendantRemoving, numeric-name
-   `WaitForChild`, GetService sweeps — same family as the §3 signature
-   canary). The run then fails with `attempt to index nil with 'sub'`:
-   the *inner* program's `getfenv()` resolves before the harness
-   materializes the script globals for that path (envlog trampoline
-   ordering). **Known harness gap**, candidate for a future wave: inner-VM
-   env resolution must see the stdlib fallthrough regardless of when the
-   inner program first calls `getfenv()`.
+1. The extracted VM chunk had dropped the `superflow_bytecode` global, so
+   the harness answered it with an ever-callable proxy (poisoned data).
+2. The primed input assigned `_bsdata0` AFTER the blob line; the blob's
+   embedded `_bsdata0[10]` concat read it too early.
+3. A real envlog fidelity bug: script globals land in the env **facade**
+   table (the nearly-empty table `getfenv()` hands out), not in GLOBALS.
+   A script-side nil-out (`_bsdata0 = nil`, anti-dump) therefore fell
+   through to GLOBALS, where the key had never been written, and the
+   `__index` proxy answered a *function* for a global the script itself
+   had removed. Fixed with `SEEN_GLOBALS` tracking on both the facade's
+   `__newindex` and GLOBALS' metatable: seen-then-nil'd keys now read
+   back as `nil`, exactly like real Luau.
+4. Missing executor surface: `delfolder`, `syn` (type-checked as table!),
+   and a canned-filesystem map so `readfile("static_content_170926/
+   init-f07dbcbe19a-sephal.lua")` can answer with the real cached text
+   (`CFG.readfile_map`; `isfile`/`isfolder` derive from it).
 
-Takeaway: Luarmor V4 is a Luraph-v15-virtualized bootstrap ("superflow")
-wrapped around an auth client, i.e. Luraph inside Luarmor inside Luraph.
-Our toolchain handles the outer two layers today; the innermost program
-needs the env-ordering fix above, after which the full superflow logic
-(cache encrypt/decrypt, client fetch/launch, `ce_like_loadstring_fn` +
-`luraph_runtime1` definition) is recoverable statically.
+With those fixed, the input is assembled in stub order
+(`_bsdata0` → `superflow_bytecode` → chunk with the module id passed as
+vararg, mirroring the stub's `loadstring(a)(b)` fresh path) plus
+`ldrupd8m = <raw init text>` (the stub sets this only on fresh downloads)
+and a placeholder `script_key`. The bootstrap then **runs its real logic
+in the sandbox**: task.watchdogs, a 159×288 ScreenGui/Frame loader window,
+the full Path2D fingerprint canary (12 offline-engine answers), signal
+probes, `isfile` cache probe, and finally the auth handshake below.
 
-No key is involved anywhere in this chain — analysis artifacts:
-`gdrive_in/Luarmor/stub/` (loader.lua, sephal_init.lua, sephal_vm_chunk.lua,
-sephal_primed2.lua, sephal_devirt.lua, traces).
+### The superflow auth request (fully captured)
+
+```lua
+local response = syn.request({
+    Method = "GET",
+    Url = "https://x.luarmor.net/a9b90889ea88d2a9cfaac"
+        .. "?a=fa6607"           -- SKU/version marker (env-check constant)
+        .. "&d=<203 hex>"        -- _bsdata0[7] verbatim (stub signing blob)
+        .. "&b=<105 chars>"      -- computed 52-byte signature, see below
+})
+HttpService:JSONDecode(response.Body)
+```
+
+- `x.luarmor.net` is a new auth host, not in the §2 region list.
+- `d` is byte-identical to `_bsdata0[7]`; `a` matches the chunk's embedded
+  `"fa6607"` marker — both static.
+- `b` is **computed at runtime** (105 chars ≙ 52 bytes + 1 nibble char) and
+  matches no trivial derivation of `_bsdata0[2]`/`[10]` (XOR/add/concat)
+  nor sha256/sha1/sha512 truncations of the blobs or the placeholder key —
+  the derivation (and its inputs, e.g. `game.JobId`, hwid, `script_key`)
+  lives inside the VM-interpreted superflow bytecode. Replaying the GET
+  with a sandbox-computed `b` is answered by the server-side tripwire
+  ("This loader code is outdated…", same family as the §11 CDN trap).
+
+Failure ladder observed in-sandbox (each fixed check revealed the next):
+`State294` (missing `ldrupd8m`/vararg) → `State848` ("Lrmsfail",
+missing `script_key` / failed handshake) → both end in the CoreGui
+"Loader Failed" ErrorPrompt loop + `LocalPlayer:Kick`.
+
+## 13. Harness/tooling upgrades that made this possible
+
+All generic, regression-protected (npm test 29/29 + golden green):
+
+- envlog `SEEN_GLOBALS`: nil-out fidelity for script-removed globals
+  (anti-dump patterns in Luarmor/Luraph chains).
+- envlog canned filesystem: `CFG.readfile_map` + derived
+  `isfile`/`isfolder` (cache-integrity checks are now answerable).
+- envlog executor surface: `E.delfolder`, `E.syn = {request = …}` (typed
+  table, routed through the recorded request path).
+- harness.js `luaValue`: plain-object CFG values serialize correctly
+  (keys quoted) — previously produced `[object Object]`.
+- `CFG.trace_globals`: per-key global read/write/nil-out logging with
+  caller `debug.info` + traceback (used to pin down every bug above).
+
+Remaining gap (future wave): the superflow *program* itself is VM
+bytecode, never `loadstring`ed as source, so the chunk-capture pipeline
+never sees it. Recovering `ce_like_loadstring_fn` / `luraph_runtime1`
+and the `b` signature derivation requires interpreting the 9.6 KB blob
+— either via the envlog optrace ring (`E.__TR`, (loop, pc, op) log) to
+reconstruct its control flow, or by emulating the v15 dispatch loop
+directly. The outer two layers (stub, VM chunk) are fully mapped today.
+
+Analysis artifacts: `gdrive_in/Luarmor/stub/` — `loader.lua` (stub),
+`sephal_init.lua` (CDN trap), `init-f07dbcbe19a-sephal.lua` (stage 2),
+`superflow_stmt.lua` + `vm_chunk_line.lua` (split), `sephal_v3.lua`
+(correctly ordered + primed input), `sephal_full.lua` (intermediate),
+`sephal_devirt.lua` (outer devirt), `/tmp/sephal_v5.raw.txt` (final
+behaviour trace incl. the auth request).

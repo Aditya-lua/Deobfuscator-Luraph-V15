@@ -367,7 +367,10 @@ function patchEntries(source, filePath, chunkTag) {
     const pfKey = info.pf_key || pv;
     let code = ` __PF[${v}]=${pfKey} `;
     const cap = info.captures.map(nm => `__PA[${pv}].${nm}=${nm};`).join('');
-    code += `if __PA and not __PA[${pv}] then __PA[${pv}]={};__PA.n=__PA.n+1;__PA[${pv}].__seq=__PA.n;` +
+    // __PA.n cap: dispatch-local protos are keyed by a FRESH table per call
+    // (A[49](x)) -- without a cap every call re-registers 14 captures and
+    // __PA grows unbounded (observed: run crawls to a halt)
+    code += `if __PA and __PA.n<64 and ${pv}~=nil and not __PA[${pv}] then __PA[${pv}]={};__PA.n=__PA.n+1;__PA[${pv}].__seq=__PA.n;` +
             `__PA[${pv}].__maker="${tag}@${l2},${c2}";__PK[${pfKey}]=${v};${cap} end `;
     if (info.mode === 'dispatch_local') code = code + ' ';   // standalone statement at stmt-2 start
     edits.push([l2, c2, code]);

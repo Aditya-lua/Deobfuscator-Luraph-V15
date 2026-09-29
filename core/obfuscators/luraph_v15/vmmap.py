@@ -47,18 +47,47 @@ def local_name(expr):
         return expr["local"]["name"]
     return None
 
+def _loop_body(n):
+    """(body statements, form) of an endless while/repeat loop, else None.
+    Both are Luraph v15 dispatch forms: `while true do ... end` and
+    `repeat ... until false`."""
+    t = n.get("type")
+    if t == "AstStatWhile":
+        cond = n["condition"]
+        if cond.get("type") != "AstExprConstantBool" or not cond.get("value"):
+            return None
+        return n["body"]["body"], "while"
+    if t == "AstStatRepeat":
+        cond = n["condition"]
+        if cond.get("type") != "AstExprConstantBool" or cond.get("value"):
+            return None
+        body = n.get("body")
+        if not isinstance(body, dict):
+            return None
+        return body["body"], "repeat"
+    return None
+
+def _unwrap(e):
+    while e.get("type") == "AstExprGroup":
+        e = e["expr"]
+    return e
+
+def _fix_int(v):
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
 def find_dispatchers(root):
-    """while true do local op = ARR[PC]; if-tree ... end"""
+    """while true do local op = ARR[PC]; if-tree ... end -- and the
+    repeat...until false form. The fetch head may be parenthesized
+    (`local y=(V[W])`): an AstExprGroup the AST keeps around the index."""
     found = []
 
     def visit(n):
-        if n.get("type") != "AstStatWhile":
+        loop = _loop_body(n)
+        if loop is None:
             return
-        cond = n["condition"]
-        if cond.get("type") != "AstExprConstantBool" or not cond.get("value"):
-            return
-        body = n["body"]["body"]
-
+        body, form = loop
         if len(body) < 2 or body[0]["type"] not in ("AstStatLocal", "AstStatAssign"):
             return
         st = body[0]
@@ -70,14 +99,14 @@ def find_dispatchers(root):
             opname = local_name(st["vars"][0])
             if not opname:
                 return
-        v = st["values"][0]
+        v = _unwrap(st["values"][0])
         if v["type"] != "AstExprIndexExpr":
             return
-        arr, pc = local_name(v["expr"]), local_name(v["index"])
+        arr, pc = local_name(_unwrap(v["expr"])), local_name(_unwrap(v["index"]))
         if not arr or not pc or body[1]["type"] != "AstStatIf":
             return
         found.append({"node": n, "op": opname, "arr": arr, "pc": pc, "tree": body[1],
-                      "rest": body[2:]})
+                      "rest": body[2:], "form": form})
 
     walk(root, visit)
     return found
@@ -210,6 +239,60 @@ def decl_key(local):
     """Identity of a local: its declaration location."""
     return local["location"]
 
+def _free_names(fn):
+    """Names used inside `fn` whose declaration lives outside it (free
+    upvalues): every AstExprLocal the function's own decl map does not know.
+    Mirrors _freeNames in src/vmmap.js (the capture hook uses the same list)."""
+    own = set(_decls_in(fn))
+    names = set()
+
+    def visit(n):
+        if isinstance(n, dict):
+            if n.get("type") == "AstExprLocal" and decl_key(n["local"]) not in own:
+                names.add(n["local"]["name"])
+            for v in n.values():
+                visit(v)
+        elif isinstance(n, list):
+            for v in n:
+                visit(v)
+    visit(fn["body"])
+    return sorted(names)
+
+def _register_dispatch_local(out, stack):
+    """v3 'dispatch_local' maker: some Luraph v15 builds decode the proto
+    INSIDE the dispatcher's own closure (`C=function(...) local
+    P=W[9] and A[113](x),...`), so the sephal-era maker-assign hook has no
+    match (or the assigned closure is parenthesized and never compares equal
+    to the walked node). Hook after the dispatcher's first local instead: the
+    first local is the live proto/register state, and the free upvalues
+    (A/V/x/W ... VM state) are what a capture needs. Same shape and tag
+    positions as the JS side (src/vmmap.js makerInfo v3), so dump tags made
+    by either match."""
+    if not stack:
+        return False
+    clo = stack[-1]
+    if not clo.get("vararg") or clo.get("args"):
+        return False
+    body = clo.get("body")
+    bbody = body.get("body") if isinstance(body, dict) else None
+    if not bbody or len(bbody) < 2:
+        return False
+    first, second = bbody[0], bbody[1]
+    if first.get("type") != "AstStatLocal" or not first.get("vars"):
+        return False
+    pv = first["vars"][0]["name"]
+    l2, c2, _, _ = loc(second)
+    key = ("v3", l2, c2)
+    if key in out:
+        return True
+    shadowed = {v["name"] for v in first["vars"]}
+    caps = [nm for nm in _free_names(clo) if nm not in shadowed]
+    out[key] = {"at": (l2, c2), "var": pv, "proto": pv, "mode": "dispatch_local",
+                "pf_key": '"disp@%d,%d"' % (l2, c2),
+                "maker": stack[-2] if len(stack) >= 2 else None,
+                "vm": clo, "stmt": first, "captures": caps}
+    return True
+
 def maker_info(root, disp=None):
     disp_nodes = {id(d["node"]) for d in (disp if disp is not None else find_dispatchers(root))}
     out = {}
@@ -225,7 +308,8 @@ def maker_info(root, disp=None):
             elif t and t.startswith("AstStat"):
                 stmts.append((n, len(stack)))
                 pushed_stmt = True
-            if t == "AstStatWhile" and id(n) in disp_nodes:
+            if t in ("AstStatWhile", "AstStatRepeat") and id(n) in disp_nodes:
+                registered = False
                 oi = max((i for i, f in enumerate(stack) if len(f["args"]) >= 2), default=-1)
                 if oi != -1 and oi + 1 < len(stack):
                     clo = stack[oi + 1]
@@ -243,7 +327,10 @@ def maker_info(root, disp=None):
 
                                                      "pf_key": stack[oi]["args"][pi]["name"],
                                                      "maker": stack[oi], "vm": clo, "stmt": st}
-            for v in n.values():
+                                registered = True
+                if not registered:
+                    _register_dispatch_local(out, stack)
+            for v in list(n.values()):
                 walk_tree(v, stack, stmts)
             if pushed_stack:
                 stack.pop()
@@ -254,7 +341,8 @@ def maker_info(root, disp=None):
                 walk_tree(v, stack, stmts)
     walk_tree(root, [], [])
     for info in out.values():
-        info["captures"] = _captures(info)
+        if info.get("mode") != "dispatch_local":
+            info["captures"] = _captures(info)
     return list(out.values())
 
 def _maker_params(maker):
@@ -345,6 +433,67 @@ def _maker_params(maker):
     others = sorted(i for i in visible.values() if i not in (0, pi) and args[i]["location"] in used)
     ui = others[0] if others else pi + 1
     return pi, ui
+
+def ctor_assignments(root):
+    """Functions assigned by index into a captured table anywhere in the
+    source: `(A)[0x3c]=function(W,m) ...` -> {("A", 60): fn}. Luraph builds
+    that register their closure factory at run time (a plain assignment, not
+    a table constructor) are invisible to find_ctor_funcs; the dump's captured
+    table for `A` still holds the function under the same index, so binding
+    needs the assignment form too."""
+    out = {}
+
+    def visit(n):
+        if isinstance(n, dict):
+            if n.get("type") == "AstStatAssign":
+                for var, val in zip(n["vars"], n["values"]):
+                    if _unwrap(val).get("type") != "AstExprFunction" or \
+                            var.get("type") != "AstExprIndexExpr":
+                        continue
+                    val = _unwrap(val)
+                    base = local_name(_unwrap(var["expr"]))
+                    idx = _unwrap(var["index"])
+                    if not base:
+                        continue
+                    if idx.get("type") == "AstExprConstantNumber":
+                        out.setdefault((base.encode("latin-1"), _fix_int(idx["value"])), val)
+                    elif idx.get("type") == "AstExprConstantString":
+                        out.setdefault((base.encode("latin-1"), idx["value"].encode("latin-1")), val)
+            for v in list(n.values()):
+                visit(v)
+        elif isinstance(n, list):
+            for v in n:
+                visit(v)
+    visit(root)
+    return out
+
+def outer_decls(root, target):
+    """{decl key: name} of every declaration outside `target` (a function
+    node) that encloses it: params and locals of the functions on the
+    root->target path. The innermost declaration of a name wins, so the VM
+    closure's free names resolve to the same decl keys the interpreter sees."""
+    found = {}
+
+    def visit(n, stack):
+        if isinstance(n, dict):
+            t = n.get("type")
+            pushed = False
+            if t == "AstExprFunction":
+                stack.append(n)
+                pushed = True
+            if n is target:
+                for fn in stack[:-1]:
+                    for k, nm in _decls_in(fn).items():
+                        found[k] = nm
+            for v in list(n.values()):
+                visit(v, stack)
+            if pushed:
+                stack.pop()
+        elif isinstance(n, list):
+            for v in n:
+                visit(v, stack)
+    visit(root, [])
+    return found
 
 def _decls_in(fn):
     cache = fn.get("_decls")

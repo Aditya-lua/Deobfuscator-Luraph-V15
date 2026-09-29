@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 import re
@@ -45,7 +46,8 @@ class PatchLog(dict):
 
 class Dump:
     def __init__(self, path):
-        with open(path, encoding="utf-8") as f:
+        opener = gzip.open if str(path).endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as f:
             d = json.load(f)
         self.raw = d
         self.tables = {}
@@ -518,9 +520,20 @@ class VMModel:
     def upvals_index(self):
         return self.info.get("upvals_index", 2)
 
-    def maker_args(self, vmobj, proto, upvals):
+    def maker_args(self, vmobj, proto, upvals, cap=None):
         n = len(self.maker["args"])
         vals = [None] * max(n, 3)
+        if self.info.get("mode") == "dispatch_local" and cap is not None:
+            # this build's factory does not take (vmobj, proto, upvals): its
+            # real arguments were captured per proto (`__PA[pv]` holds every
+            # free name, the parameters included)
+            for i, a in enumerate(self.maker["args"]):
+                nm = a["name"]
+                if nm == "..." :
+                    continue
+                if nm in cap:
+                    vals[i] = cap[nm]
+            return vals
         vals[0], vals[self.proto_index()], vals[self.upvals_index()] = vmobj, proto, upvals
         return vals
 
@@ -651,10 +664,22 @@ class ProtoLifter:
     """Steps the instructions of one proto."""
     walk_only = False   
 
-    def __init__(self, vm, dump, vmobj, proto, upvals, globals_tab):
+    def __init__(self, vm, dump, vmobj, proto, upvals, globals_tab, cap=None, shared=None):
         self.vm = vm
         self.vmobj = vmobj
         self.dump = dump
+        self.cap = cap
+        # by-name fallback for the capture's values (see Interp.getvar):
+        # a captured proto gets its own capture; an uncaptured child gets the
+        # VM-wide shared fields (A/P/j/l) every proto's capture agrees on
+        self.cap_fallback = {}
+        src = cap if cap is not None else (shared or {})
+        for nm, v in src.items():
+            if nm in ("self", "__maker", "__seq"):
+                continue
+            if v is None or isinstance(v, (LTable, Builtin, OpaqueFn, Opaque,
+                                           int, float, bytes, bool)):
+                self.cap_fallback[nm] = v
         self.special = vm.special
         self.globals_tab = globals_tab
         self.out = []
@@ -693,7 +718,22 @@ class ProtoLifter:
 
         it = S.Interp(self)
         self.making = True
-        r = it.call_lua(LuaFunc(vm.maker, Scope()), Multi(vm.maker_args(vmobj, proto, upvals)))
+        env0 = Scope()
+        if cap is not None and getattr(vm, "outer", None):
+            # free names of the VM closure the maker's own scope cannot
+            # resolve (helpers registered in an enclosing method: A, P, ...)
+            # come from the capture, bound at their real declaration keys so
+            # a scope miss falls back to the same values the real run saw.
+            # Attached before the maker call: the maker's body references
+            # them too (it registers itself into the helper table).
+            for key, nm in vm.outer.items():
+                if nm not in cap:
+                    continue
+                v = cap[nm]
+                if v is None or isinstance(v, (LTable, Builtin, OpaqueFn, Opaque,
+                                               int, float, bytes, bool)):
+                    env0.vars[key] = v
+        r = it.call_lua(LuaFunc(vm.maker, env0), Multi(vm.maker_args(vmobj, proto, upvals, cap)))
         self.making = False
         f = r.first() if isinstance(r, Multi) else r
         if not isinstance(f, LuaFunc) or f.node is not vm.vm:
@@ -1595,6 +1635,22 @@ class ProtoLifter:
         whose maker was called, when it is not this proto's."""
         vals = args.items
         vm = vm or self.vm
+        if vm.info.get("mode") == "dispatch_local":
+            # this build's factory takes (state table, flag): the state table
+            # IS the child's proto container (V/U/Q/... slots). A table the
+            # capture ran through maps to its own capture; a table the run
+            # built but never called still carries the child's decoded arrays
+            # in its slots, so it lifts straight from the state table
+            st = vals[0] if vals and isinstance(vals[0], LTable) else None
+            cap = self.dump.cap_by_state.get(st.tid) if st is not None else None
+            proto = cap["self"] if cap is not None and isinstance(cap.get("self"), LTable) else st
+            if proto is not None:
+                c = ClosureExpr(proto, [])
+                c.vm = vm
+                c.state_table = st
+                c.shared_cap = self.dump.shared_cap
+                self.children.append(c)
+                return c
         pi, ui = vm.proto_index(), vm.upvals_index()
         proto = vals[pi] if len(vals) > pi else None
         ups = vals[ui] if len(vals) > ui else None
@@ -1976,23 +2032,26 @@ class Stepper:
         cs = lifter.initial_state()
         self.cs = cs
 
-        self.loops = []   
+        self.loops = []
         for i, st in enumerate(vm.inner_body):
             if st["type"] == "AstStatIf":
                 tb = st["thenbody"]["body"]
-                if tb and tb[0]["type"] == "AstStatWhile" and vm.is_dispatch(tb[0]):
+                if tb and tb[0]["type"] in ("AstStatWhile", "AstStatRepeat") and vm.is_dispatch(tb[0]):
                     self.loops.append((i, st, tb[0]))
         self.mode_decl = None
         if not self.loops:
 
             for i, st in enumerate(vm.inner_body):
-                if st["type"] == "AstStatWhile" and vm.is_dispatch(st):
+                if st["type"] in ("AstStatWhile", "AstStatRepeat") and vm.is_dispatch(st):
                     self.loops.append((i, None, st))
                     break
         if not self.loops:
             raise Unsupported("no dispatch loops in the VM function")
         w = self.loops[0][2]
-        pcname = w["body"]["body"][0]["values"][0]["index"]["local"]
+        head = w["body"]["body"][0]["values"][0]
+        while head.get("type") == "AstExprGroup":
+            head = head["expr"]
+        pcname = head["index"]["local"]
         self.pc_decl = pcname["location"]
 
         self.conds = {}
@@ -2684,6 +2743,7 @@ def analyze_source(path):
     key = chunk_key(text)
     disp = vmmap.find_dispatchers(root)
     ctor = find_ctor_funcs(root)
+    assign_ctor = vmmap.ctor_assignments(root)
     vms = {}
     for info in vmmap.maker_info(root, disp):
         vm_node = info["vm"]
@@ -2692,6 +2752,8 @@ def analyze_source(path):
         tag = "%s@%d,%d" % ((key,) + tuple(info["at"]))
         vms[tag] = VMModel(info, inside, ctor)
         vms[tag].tag = tag
+        vms[tag].outer = vmmap.outer_decls(root, vm_node)
+        vms[tag].assign_ctor = assign_ctor
 
     for k, node in ctor.items():
         parts = jit_maker_parts(node)
@@ -2727,6 +2789,51 @@ class Program:
                 vm.src_lines = lines
         self.dump.vm_names = {vm.maker["args"][0]["name"] for vm in self.vms.values()}
 
+        # dump protos captured under a different chunk name (the harness may
+        # tag a captured chunk "payload") still match by their @line,col
+        # suffix: rewrite the tag so vm_of finds the analyzed VM model
+        by_suffix = {}
+        for tag in self.vms:
+            by_suffix[tag.rpartition("@")[2]] = tag
+        for cap in self.dump.protos.values():
+            mk = cap.get("__maker")
+            if mk is None:
+                continue
+            tag = mk.decode("latin-1") if isinstance(mk, bytes) else str(mk)
+            if tag not in self.vms:
+                hit = by_suffix.get(tag.rpartition("@")[2])
+                if hit is not None:
+                    cap["__maker"] = hit.encode("latin-1")
+
+        # index the captures by their self table so a lifted child proto finds
+        # its own captured state (its W/V/... tables) instead of its parent's
+        self.dump.cap_by_self = {}
+        self.dump.cap_by_state = {}
+        for cap in self.dump.protos.values():
+            sv = cap.get("self")
+            if isinstance(sv, LTable):
+                self.dump.cap_by_self[sv.tid] = cap
+            st = cap.get(vm.maker["args"][0]["name"]) if isinstance(vm.maker, dict) else None
+            if isinstance(st, LTable):
+                self.dump.cap_by_state[st.tid] = cap
+
+        # VM-wide capture fields every proto's capture agrees on (helpers,
+        # shared tables): the values uncaptured children still need
+        shared = {}
+        caps_list = [c for c in self.dump.protos.values() if c.get("__maker") is not None]
+        if caps_list:
+            for nm in caps_list[0]:
+                if nm in ("self", "__maker", "__seq"):
+                    continue
+                vs = [c.get(nm) for c in caps_list]
+                ids = {v.get("t") if isinstance(v, dict) else id(v) for v in vs}
+                if len(ids) == 1:
+                    v = vs[0]
+                    if v is None or isinstance(v, (LTable, Builtin, OpaqueFn, Opaque,
+                                                   int, float, bytes, bool)):
+                        shared[nm] = v
+        self.dump.shared_cap = shared
+
         for cap in self.dump.protos.values():
             try:
                 vm = self.vm_of(cap)
@@ -2735,17 +2842,25 @@ class Program:
                 # chunk that was not written out): skip it instead of aborting
                 # the whole Program construction
                 continue
-            try:
-                e = cap.get(vm.maker["args"][0]["name"])
-            except (KeyError, AttributeError, IndexError):
-                continue
             ctor = self.ctors[id(vm)]
-            if isinstance(e, LTable):
+            assign_ctor = getattr(vm, "assign_ctor", {})
+            for nm, e in cap.items():
+                if not isinstance(e, LTable):
+                    continue
                 for k, v in e.h.items():
-                    if isinstance(v, OpaqueFn) and v.node is None and k in ctor:
-                        v.node = ctor[k]
-                    elif isinstance(v, OpaqueFn) and v.node is None and isinstance(k, int) and k in ctor:
-                        v.node = ctor[k]
+                    if not isinstance(v, OpaqueFn) or v.node is not None:
+                        continue
+                    fn = None
+                    if k in ctor:
+                        fn = ctor[k]
+                    elif isinstance(k, int) and k in ctor:
+                        fn = ctor[k]
+                    elif isinstance(k, int):
+                        fn = assign_ctor.get((nm.encode("latin-1"), k))
+                    elif isinstance(k, bytes):
+                        fn = assign_ctor.get((nm.encode("latin-1"), S.fix_int(k)))
+                    if fn is not None:
+                        v.node = fn
         g = LTable()
         for lib in ("bit32", "string", "table", "math", "buffer"):
             t = LTable()
@@ -2769,7 +2884,7 @@ class Program:
         if upvals is None:
             upvals = UpList()
         proto = vm.proto_of(cap)
-        lf = ProtoLifter(vm, self.dump, vm.vmobj_of(cap), proto, upvals, self.globals)
+        lf = ProtoLifter(vm, self.dump, vm.vmobj_of(cap), proto, upvals, self.globals, cap=cap)
         st = make_stepper(vm, lf)
         for _ in range(WALK_RESTARTS):
             s0, order, restart = self._walk(vm, lf, st, limit)
@@ -2915,7 +3030,7 @@ def show_op(prog, key, mode, pc, force_op=None):
     cap = prog.dump.protos[key]
     vm = prog.vm_of(cap)
     lf = ProtoLifter(vm, prog.dump, vm.vmobj_of(cap), vm.proto_of(cap),
-                     LTable(), prog.globals)
+                     LTable(), prog.globals, cap=cap)
     st = make_stepper(vm, lf)
     lines = prog.lines
     for i, ifn, w in st.loops:
@@ -3002,11 +3117,19 @@ class FunctionLifter:
         self.stats = {"functions": 0, "errors": 0, "fallbacks": 0}
         self.lifted = set()
 
-    def lift(self, vm, vmobj, proto, upvals, upnames, depth=0):
+    def lift(self, vm, vmobj, proto, upvals, upnames, depth=0, shared=None):
         self.stats["functions"] += 1
         self.lifted.add(id(proto))
         prefix = REG_PREFIX[depth % len(REG_PREFIX)]
-        lf = ProtoLifter(vm, self.prog.dump, vmobj, proto, upvals, self.prog.globals)
+        cap = self.prog.dump.cap_by_self.get(proto.tid)
+        if cap is not None:
+            # a captured child proto: its own state tables (W/V/...) beat the
+            # parent's vmobj the recursive call would otherwise reuse
+            w = cap.get(vm.maker["args"][0]["name"])
+            if isinstance(w, LTable):
+                vmobj = w
+        lf = ProtoLifter(vm, self.prog.dump, vmobj, proto, upvals, self.prog.globals,
+                         cap=cap, shared=shared if cap is None else None)
         lf.reg_prefix = prefix
         st = make_stepper(vm, lf)
         for _ in range(WALK_RESTARTS):
@@ -3053,7 +3176,12 @@ class FunctionLifter:
             return memo[mkey]
         uses = memo[mkey] = {}
         try:
-            lf = ProtoLifter(cvm, self.prog.dump, vmobj, c.proto, UpList(idx), self.prog.globals)
+            cap = self.prog.dump.cap_by_self.get(c.proto.tid)
+            if cap is not None:
+                w = cap.get(cvm.maker["args"][0]["name"])
+                if isinstance(w, LTable):
+                    vmobj = w
+            lf = ProtoLifter(cvm, self.prog.dump, vmobj, c.proto, UpList(idx), self.prog.globals, cap=cap)
             lf.walk_only = True
             st = make_stepper(cvm, lf)
             for _ in range(WALK_RESTARTS):
@@ -3127,7 +3255,9 @@ class FunctionLifter:
             lines, params = memo[ckey]
         else:
             try:
-                lines = self.lift(cvm, vmobj, proto, UpList(fidx), upnames, depth + 1)
+                lines = self.lift(cvm, getattr(c, "state_table", None) or vmobj, proto,
+                                  UpList(fidx), upnames, depth + 1,
+                                  shared=getattr(c, "shared_cap", None))
                 params = self.params
             except Unsupported as ex:
                 lines = ["error(\"devirt: could not lift closure: %s\")" % str(ex).replace("\"", "'")]
@@ -3453,7 +3583,8 @@ def _walk_one(prog, vm, vmobj, proto, pkey):
     nmiss = sum(dump.misses.values())
     ent = {"requests": set(), "children": [], "errors": 0, "clean": False, "bw": {}, "tw": {}}
     try:
-        lf = ProtoLifter(vm, dump, vmobj, proto, UpList(), prog.globals)
+        lf = ProtoLifter(vm, dump, vmobj, proto, UpList(), prog.globals,
+                         cap=dump.cap_by_self.get(proto.tid))
         lf.walk_only = True
         st = make_stepper(vm, lf)
         for _ in range(WALK_RESTARTS):

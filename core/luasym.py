@@ -528,6 +528,15 @@ class Interp:
             if v is not _SCOPE_MISSING:
                 return v
             s = s.parent
+        # captured VM state: a free name of a VM closure reached through a
+        # helper called with a fresh scope has no chain to the maker's env,
+        # but the capture recorded the value the real run saw (by name)
+        fb = getattr(self.L, "cap_fallback", None)
+        if fb:
+            try:
+                return fb[local["name"]]
+            except KeyError:
+                pass
         raise Unsupported("unbound local %s@%s" % (local["name"], key))
 
     def setvar(self, scope, local, v):

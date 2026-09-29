@@ -40,6 +40,7 @@ function parseArgs(argv) {
     else if (a === '--keep-preamble') { args.keepPreamble = true; }
     else if (a === '-o' || a === '--output') { args.output = argv[++i]; }
     else if (a === '--timeout') { args.timeout = parseInt(argv[++i], 10); }
+    else if (a === '--prelude-file') { args.preludeFile = argv[++i]; }
     else if (a === '--budget') { args.budget = parseInt(argv[++i], 10); }
     else if (a === '--max-runs') { args.maxRuns = parseInt(argv[++i], 10); }
     else if (a === '--devirt-rounds') { args.devirtRounds = parseInt(argv[++i], 10); }

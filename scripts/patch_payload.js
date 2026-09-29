@@ -1,0 +1,11 @@
+'use strict';
+const vmmap = require('/home/z/my-project/Deobfuscator-Luraph-V15/src/vmmap');
+const fs = require('fs');
+const src = fs.readFileSync('/home/z/my-project/Deobfuscator-Luraph-V15/flowauth_crack/work/payload_devirt.lua', 'latin1');
+const patched = vmmap.patchEntries(src, '/home/z/my-project/Deobfuscator-Luraph-V15/flowauth_crack/work/payload_devirt.lua', 'payload');
+fs.writeFileSync('/home/z/my-project/Deobfuscator-Luraph-V15/flowauth_crack/work/payload_patched.luau', patched, 'latin1');
+const i = patched.indexOf('__PF[C]');
+console.log('C-hook region:', JSON.stringify(patched.slice(i, i + 200)));
+const j = patched.indexOf('__PF[o]');
+console.log('o-hook region:', JSON.stringify(patched.slice(j, j + 120)));
+console.log('patched len:', patched.length);

@@ -2675,7 +2675,11 @@ E.loadstring = function(src, chunkname)
                 -- spin watchdog (see E.__SPIN): a chunk the driver never saw (the run
                 -- that would report it hung) gets its dispatch heads patched here
                 if CFG.spin and not (patched and R.find(patched, "__SPIN.n", 1, true)) then
+                        -- [SUPERZ] two dispatch-head shapes: while-form and
+                        -- repeat-form (Luraph v15 builds differ)
                         patched = R.gsub(patched or src, "while true do [%w_, ]-=[%a_][%w_]*%[[%a_][%w_]*%];",
+                                "%0__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;")
+                        patched = R.gsub(patched, "repeat local [%a_][%w_]*=%([%a_][%w_]*%[[%a_][%w_]*%]%);",
                                 "%0__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;")
                 end
         end
@@ -5425,11 +5429,15 @@ if CFG.serve then
                         -- bootstrap's anti-tamper snapshot cannot see or
                         -- restore them): one entry per protocol round, keyed
                         -- by full URL; a same-URL plant replaces its entry.
-                        local bodyv, headerv, urlv
+                        local bodyv, headerv, urlv, reqbodyv
                         if R.type(req) == "table" then
                                 bodyv = R.type(req.body) == "string" and req.body or nil
                                 headerv = R.type(req.headers) == "table" and req.headers or {}
                                 urlv = R.type(req.url) == "string" and req.url or nil
+                                -- [SUPERZ] optional request-body pin: the FlowAuth
+                                -- payload endpoint reuses one URL for all chunks,
+                                -- only the token in the POST body differs
+                                reqbodyv = R.type(req.reqbody) == "string" and req.reqbody or nil
                         else
                                 local okp3, parsed3 = R.pcall(function() return R.json.decode(req) end)
                                 bodyv, headerv, urlv = req, {}, nil
@@ -5437,6 +5445,7 @@ if CFG.serve then
                                         bodyv = parsed3.body
                                         urlv = parsed3.url
                                         if R.type(parsed3.headers) == "table" then headerv = parsed3.headers end
+                                        if R.type(parsed3.reqbody) == "string" then reqbodyv = parsed3.reqbody end
                                 end
                         end
                         local list = urls.__lrm_plant
@@ -5450,15 +5459,16 @@ if CFG.serve then
                         if R.type(urlv) == "string" then
                                 for i = 1, #list do
                                         local e = list[i]
-                                        if R.type(e) == "table" and e.url == urlv then
-                                                list[i] = { body = bodyv, headers = headerv, url = urlv }
+                                        if R.type(e) == "table" and e.url == urlv
+                                                and (e.reqbody or nil) == (reqbodyv or nil) then
+                                                list[i] = { body = bodyv, headers = headerv, url = urlv, reqbody = reqbodyv }
                                                 replaced = true
                                                 break
                                         end
                                 end
                         end
                         if not replaced then
-                                R.insert(list, { body = bodyv, headers = headerv, url = urlv })
+                                R.insert(list, { body = bodyv, headers = headerv, url = urlv, reqbody = reqbodyv })
                         end
                         R.print(MARK .. "PLANT-OK " .. R.tostring(#bodyv) .. " entries="
                                 .. R.tostring(#list) .. " url=" .. R.tostring(urlv ~= nil and #urlv or -1))

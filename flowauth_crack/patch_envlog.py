@@ -197,22 +197,91 @@ do
         CFG.__superz_canned = canned
 __CANNED_LUA__
         local function fakeRequest(opts)
+                -- [SUPERZ] unwrap property proxies (REALV-backed) before use
+                if (type(opts) == "table" or type(opts) == "userdata") and REALV[opts] ~= nil then
+                        opts = REALV[opts]
+                end
                 local url, body, method = "", "", "GET"
                 if type(opts) == "table" then
-                        url = tostring(opts.Url or opts.url or "")
+                        local uv = opts.Url or opts.url
+                        if (type(uv) == "table" or type(uv) == "userdata") and REALV[uv] ~= nil then uv = REALV[uv] end
+                        url = tostring(uv or "")
                         method = tostring(opts.Method or opts.method or "GET")
-                        body = tobytes(opts.Body or opts.body or "")
+                        local bv = opts.Body or opts.body
+                        if (type(bv) == "table" or type(bv) == "userdata") and REALV[bv] ~= nil then bv = REALV[bv] end
+                        body = tobytes(bv or "")
                 else
                         url = tostring(opts)
+                end
+                if not R.find(url, "^https?://") then
+                        -- [SUPERZ] diagnostics: dump the proxy info so the
+                        -- driver can show WHAT the runtime passed as opts
+                        local desc = "opts=" .. type(opts)
+                        if isP(opts) and INFO[opts] then
+                                for ik, iv in R.next, INFO[opts] do
+                                        desc = desc .. " " .. tostring(ik) .. "=" .. tostring(iv):sub(1, 60)
+                                end
+                        end
+                        if type(opts) == "table" then
+                                local uv2 = opts.Url or opts.url
+                                desc = desc .. " Url=" .. type(uv2)
+                                if isP(uv2) and INFO[uv2] then
+                                        for ik2, iv2 in R.next, INFO[uv2] do
+                                                desc = desc .. " " .. tostring(ik2) .. "=" .. tostring(iv2):sub(1, 60)
+                                        end
+                                end
+                        end
+                        print("\\1SUPERZREQOPTS\\1" .. b64encode(desc))
                 end
                 local hit = canned[method .. " " .. url] or canned[url]
                 if hit then
                         return { Success = true, StatusCode = hit.status or 200,
                                 Headers = hit.headers or {}, Body = hit.body }
                 end
-                -- leak the request into the trace (print + HttpGet url record)
+                -- [SUPERZ] in-run plant list (serve driver live responses),
+                -- full-URL prefix matched, any host; reqbody (when present)
+                -- additionally pins the entry to one REQUEST body -- the
+                -- FlowAuth payload endpoint reuses one URL for chunk 1/2,
+                -- only the token in the body differs (same-URL replay of
+                -- chunk 1 broke the payload integrity check, observed).
+                local list = urls.__lrm_plant
+                if R.type(list) == "table" then
+                        for i = 1, #list do
+                                local plant = list[i]
+                                if R.type(plant) == "table" and R.type(plant.body) == "string" then
+                                        local u = plant.url
+                                        local umatch = u == nil
+                                                or (R.type(u) == "string" and R.sub(url, 1, #u) == u)
+                                        local rb = plant.reqbody
+                                        local rbmatch = rb == nil
+                                                or (R.type(rb) == "string" and rb == body)
+                                        if umatch and rbmatch then
+                                                return { Success = true, StatusCode = plant.status or 200,
+                                                        Headers = plant.headers or {}, Body = plant.body }
+                                        end
+                                end
+                        end
+                end
+                -- leak the request into the trace (method|url|body, base64)
                 local leak = b64encode(method .. "|" .. url .. "|" .. body)
                 print("\\1SUPERZREQ\\1" .. leak)
+                -- [SUPERZ] in-run live fetch loop: suspend the whole run for
+                -- the serve driver (same process = same session nonce); the
+                -- driver plants the response and resumes this exact thread
+                if CFG.serve and SERVE_PAD and coroutine.isyieldable() then
+                        local tries = urls.__sz_tries or {}
+                        urls.__sz_tries = tries
+                        local nk = method .. " " .. url
+                        local n = (tries[nk] or 0) + 1
+                        tries[nk] = n
+                        if n <= 4 then
+                                print(SERVE_PAD)
+                                coroutine.yield("__LRMRES " .. url)
+                                -- resumed with the response planted: re-enter
+                                -- from the top (the plant scan hits now)
+                                return fakeRequest(opts)
+                        end
+                end
                 pcall(function() return E.game:HttpGet("https://superz.leak/" .. leak) end)
                 return { Success = false, StatusCode = 0, Headers = {}, Body = "" }
         end

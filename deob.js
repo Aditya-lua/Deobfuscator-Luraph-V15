@@ -13,6 +13,7 @@ function parseArgs(argv) {
     inputs: [],
     output: null,
     detect: false,
+    plugin: null,
     noDevirt: false,
     noHooks: false,
     noFold: false,
@@ -31,6 +32,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--detect') { args.detect = true; }
+    else if (a === '--plugin') { args.plugin = argv[++i]; }
     else if (a === '--no-devirt') { args.noDevirt = true; }
     else if (a === '--no-hooks') { args.noHooks = true; }
     else if (a === '--no-fold') { args.noFold = true; }
@@ -137,7 +139,13 @@ function collectInputFiles(rawPaths) {
 
 async function processFile(absInput, args) {
   const source = fs.readFileSync(absInput, 'latin1');
-  const { plugin, confidence } = detectModule.detect(source);
+  let plugin, confidence;
+  if (args.plugin) {
+    plugin = detectModule.byName(args.plugin); // force a plugin (e.g. v14.x headers score 0.3)
+    confidence = 1.0;
+  } else {
+    ({ plugin, confidence } = detectModule.detect(source));
+  }
 
   if (args.detect) {
     console.log(`${path.basename(absInput)}\t${plugin.name}\t${confidence.toFixed(2)}\t${plugin.label}`);
@@ -211,7 +219,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.inputs.length === 0) {
-    console.error('Usage: node deob.js <input.lua | folder> [more_files_or_folders...] [-o <output.lua>] [--no-devirt] [--debug] [--detect]');
+    console.error('Usage: node deob.js <input.lua | folder> [more_files_or_folders...] [-o <output.lua>] [--plugin <name>] [--no-devirt] [--debug] [--detect]');
     process.exit(2);
   }
 
@@ -224,7 +232,9 @@ async function main() {
   if (args.detect) {
     for (const file of files) {
       const source = fs.readFileSync(file, 'latin1');
-      const { plugin, confidence } = detectModule.detect(source);
+      let plugin, confidence;
+      if (args.plugin) { plugin = detectModule.byName(args.plugin); confidence = 1.0; }
+      else ({ plugin, confidence } = detectModule.detect(source));
       console.log(`${path.basename(file)}\t${plugin.name}\t${confidence.toFixed(2)}\t${plugin.label}`);
     }
     return;

@@ -36,17 +36,34 @@ REPO = "/home/z/my-project/Deobfuscator-Luraph-V15"
 LUAU = os.path.join(REPO, "bin", "luau")
 
 
-def build_serve_process(primed_source, init_text, outdir):
+def loader_time_pin(stub_text):
+    """The sandbox clock must track the loader's build timestamp: _bsdata0
+    carries a ~now epoch entry that rotates with the loader file. A stale
+    time_pin skews the bootstrap's clock vs the server/loader (~hours after a
+    container reset) and the session validation rejects -> State848."""
+    now = int(time.time())
+    m = re.search(r"_bsdata0=\{([^}]*)\}", stub_text)
+    if m:
+        for n in re.findall(r"\d{9,10}", m.group(1)):
+            v = int(n)
+            if abs(v - now) < 4 * 86400:
+                return v
+    return now
+
+
+def build_serve_process(primed_source, init_text, outdir, time_pin):
     cfg = {
         "readfile_map": {
             "static_content_170926/init-f07dbcbe19a-sephal.lua": init_text,
-            # planted at build time: present in the bootstrap's phase-1 state
-            # snapshot, so the anti-tamper key-diff restore keeps the key (and
-            # its CURRENT value once the real body is passed in with phase 2)
-            "__lrm_session_response": "PENDING",
+            # NOTE: no "__lrm_session_response" placeholder here anymore -- the
+            # legacy readfile_map plant is superseded by the urls.__lrm_plant
+            # list + the in-run live-fetch loop (a placeholder pre-empts it).
         },
-        "time_pin": 1790607955,
-        "time_budget": 120, "devirt": False, "spin": 60, "trace_globals": True,
+        "time_pin": time_pin,
+        # the in-run live fetch adds real seconds per protocol round (the
+        # budget hook counts wall clock), so raise it accordingly
+        "time_budget": 300, "devirt": False, "spin": 60, "trace_globals": True,
+        "call_log": True, "call_log_full": True,
         "serve": True,
     }
     d = tempfile.mkdtemp(prefix="lrm2p_", dir=outdir)
@@ -133,11 +150,13 @@ def main():
         return 1
     patched = open(pp + ".patched.lua", encoding="latin-1").read()
 
-    d, hp = build_serve_process(patched, init_text, outdir)
+    time_pin = loader_time_pin(stub_text)
+    print("    time_pin: %d (loader build time, now=%d)" % (time_pin, int(time.time())))
+    d, hp = build_serve_process(patched, init_text, outdir, time_pin)
     proc = subprocess.Popen([LUAU], cwd=d, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-    print("[2] phase 1: building the handshake in-sandbox ...")
+    print("[2] require + start: driving the live protocol in-run ...")
     proc.stdin.write(b'__S = require("./harness")\n')
     proc.stdin.flush()
     time.sleep(8)                      # let the 2.9 MB harness module compile
@@ -147,75 +166,101 @@ def main():
                 break
     except Exception:
         pass
-    # the REPL occasionally swallows a statement sent right after the compile;
-    # starts are idempotent (b is process-stable), so just re-send on silence
-    t1, err = None, None
-    for attempt in range(3):
-        t1, err = repl(proc, '__S("", "", "start")', 120)
-        if t1 is not None and extract_url(t1):
-            break
-        print("    (retry %d: no reply/URL)" % (attempt + 1))
-    if t1 is None or not extract_url(t1):
-        print("[!] phase 1 failed:", repr((err or "")[-400:]))
-        return 1
-    open(os.path.join(outdir, "phase1.raw.txt"), "w", encoding="latin-1").write(t1)
-    url = extract_url(t1)
-    if not url:
-        print("[!] no handshake captured in phase 1")
-        return 1
-    print("    %s" % url[:110])
 
-    print("[3] live handshake replay ...")
     import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": ROBLOX_UA})
-    with urllib.request.urlopen(req, timeout=25) as r:
-        body = r.read().decode("latin-1")
-        resp_headers = {k: v for k, v in r.headers.items()}
-    status = 200
-    kind = classify_response(body)
-    print("    HTTP %s, %s (%d bytes)" % (status, kind, len(body)))
-    open(os.path.join(outdir, "live_response.txt"), "w", encoding="latin-1").write(body)
-    if kind != "session-response":
-        print("[!] server answered: %s" % body[:160])
-        return 1
 
-    print("[4] injecting the response into the same process (http mode) ...")
-    # a trailing-* key prefix-matches in envlog; it also sidesteps the pure-Luau
-    # JSON decoder mangling 570+ char keys (observed: 571 -> 567 chars)
-    wc = url.split("?")[0] + "*"
-    http_map = json.dumps({wc: {"status": 200, "body": body}})
-    nreq = 1
-    mod = os.path.join(d, "resp_%d.luau" % nreq)
-    with open(mod, "w", encoding="latin-1") as f:
-        f.write("return %s\n" % harness.long_string(http_map))
-    t2, err = repl(proc, '__S(require("./resp_%d"), "", "http")' % nreq, 60, expect="HTTPMAP ")
-    open(os.path.join(outdir, "inject.raw.txt"), "w", encoding="latin-1").write(t2 or "")
-    if t2 is None or "HTTPMAP true" not in t2 or "keys=0" in t2:
-        print("[!] http map injection failed:", (t2 or err or "")[-400:].strip())
-        return 1
-    print("    injected ok:", [l.strip()[:120] for l in t2.splitlines() if "HTTPMAP" in l or "READBACK" in l])
+    def drive(stmt, timeout):
+        """Send one serve call; read the stream until the run suspends for a
+        live fetch (NEEDFETCH <url>), finishes (ENVLOG-END), or times out."""
+        proc.stdin.write(stmt.encode() + b"\n")
+        proc.stdin.flush()
+        buf = b""
+        t0 = time.time()
+        while True:
+            left = timeout - (time.time() - t0)
+            if left <= 0:
+                return "timeout", buf.decode("latin-1", "replace")
+            r, _, _ = select.select([proc.stdout], [], [], min(left, 2))
+            if not r:
+                continue
+            chunk = proc.stdout.read1(1 << 20)
+            if not chunk:
+                return "dead", buf.decode("latin-1", "replace")
+            buf += chunk
+            m = re.search(rb"NEEDFETCH (https?://\S+)", buf)
+            if m:
+                return "fetch", m.group(1).decode()
+            if harness.mark("ENVLOG-END").encode() in buf:
+                return "end", buf.decode("latin-1", "replace")
 
-    print("[5] phase 2: same process replays the handshake and decrypts ...")
-    nreq += 1
-    mod = os.path.join(d, "resp_%d.luau" % nreq)
-    # quoted+escaped string: the runtime require rejects long-bracket modules
-    # that luau-ast accepts (observed: "Expected <eof>, got ']'")
-    payload = json.dumps({"body": body, "headers": resp_headers})
-    lit = '"' + payload.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    with open(mod, "w", encoding="latin-1") as f:
-        f.write("return %s\n" % lit)
-    t3, err = repl(proc, '__S(require("./resp_%d"), "", "start")' % nreq, 240)
-    if t3 is None:
-        print("[!] phase 2 failed:", (err or "")[-400:])
-        return 1
-    open(os.path.join(outdir, "phase2.raw.txt"), "w", encoding="latin-1").write(t3)
-    open(os.path.join(outdir, "phase2.full.txt"), "w", encoding="latin-1").write(RAW[0])
-    urls = re.findall(r"--   (https?://\S+)", t3)
-    states = sorted(set(re.findall(r"Error: (State\d+)", t3)))
-    chunks = re.findall(r"loadstring\(\) of (\d+) bytes", t3)
-    kicked = "LocalPlayer:Kick" in t3
-    print("    states: %s | urls found: %s | loadstrings: %s | kicked: %s"
-          % (states or "-", sorted(set(urls))[:4] or "-", chunks or "-", kicked))
+    planted = {}
+
+    def plant(url_u, body_u, headers_u):
+        # native-table plant: no JSON decoder in the path, any body size
+        def esc(s):
+            return '"' + s.replace("\\", "\\\\").replace('"', '\\"') \
+                .replace("\n", "\\n").replace("\r", "\\r") + '"'
+        mod_p = os.path.join(d, "resp_%d.luau" % (len(planted) + 1 + 1000))
+        hdr = "{" + ", ".join("[%s] = %s" % (esc(str(k)), esc(str(v)))
+                              for k, v in headers_u.items()) + "}"
+        with open(mod_p, "w", encoding="latin-1") as f:
+            f.write("return { url = %s, body = %s, headers = %s }\n"
+                    % (esc(url_u), esc(body_u), hdr))
+        okp = None
+        for attempt in range(3):    # the REPL can swallow a post-compile stmt
+            okp, errp = repl(proc, '__S(require("./resp_%d"), "", "plant")'
+                             % (len(planted) + 1 + 1000), 120, expect="PLANT-")
+            if okp is not None and "PLANT-OK" in okp:
+                break
+            print("    (plant retry %d)" % (attempt + 1))
+        if okp is None or ("PLANT-OK %d" % len(body_u)) not in okp:
+            print("[!] plant failed:", (okp or errp or "")[-300:].strip())
+            return False
+        print("    ", [l.strip()[-70:] for l in okp.splitlines() if "PLANT-OK" in l])
+        planted[url_u] = len(body_u)
+        return True
+
+    stmt = '__S("", "", "start")'
+    nfetch = 0
+    while True:
+        mode, data = drive(stmt, 300)
+        if mode == "fetch":
+            nfetch += 1
+            url_u = data
+            print("    round %d NEEDFETCH %s" % (nfetch, url_u[-40:]))
+            try:
+                req2 = urllib.request.Request(url_u, headers={"User-Agent": ROBLOX_UA})
+                with urllib.request.urlopen(req2, timeout=30) as r:
+                    body_u = r.read().decode("latin-1")
+                    headers_u = {k: v for k, v in r.headers.items()}
+            except Exception as exc:
+                print("[!] live fetch failed: %s" % exc)
+                return 1
+            kind = classify_response(body_u)
+            print("        -> %s (%d bytes)" % (kind, len(body_u)))
+            open(os.path.join(outdir, "resp_r%02d_%s.txt" % (nfetch, url_u[-12:])),
+                 "w", encoding="latin-1").write(body_u)
+            if kind in ("stale-loader", "executor-trap"):
+                print("[!] server rejected the handshake: %s" % body_u[:140])
+                return 1
+            if not plant(url_u, body_u, headers_u):
+                return 1
+            stmt = '__S("", "", "resume")'
+            continue
+        break
+
+    text = data if isinstance(data, str) else data.decode("latin-1", "replace")
+    open(os.path.join(outdir, "final.raw.txt"), "w", encoding="latin-1").write(text)
+    states = sorted(set(re.findall(r"Error: (State\d+)", text)))
+    chunks = re.findall(r"loadstring\(\) of (\d+) bytes", text)
+    kicked = "LocalPlayer:Kick" in text
+    status = re.search(r"-- run status: (.*)", text)
+    print("[3] run finished: fetches=%d states=%s loadstrings=%s kicked=%s"
+          % (nfetch, states or "-", chunks or "-", kicked))
+    if status:
+        print("    %s" % status.group(1)[:160])
+    urls_all = re.findall(r"--   (https?://\S+)", text)
+    print("    urls requested: %d" % len(urls_all))
     print("[+] artifacts in %s" % outdir)
     proc.kill()
     return 0

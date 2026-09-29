@@ -463,3 +463,82 @@ same run loads the client chunk. Fixed en route: the runtime require rejects
 long-bracket modules that luau-ast accepts (resp modules use quoted+escaped
 strings), and the syn.request handler guards userdata Urls before
 string-matching.
+
+## 15. The real-script-key wave (Sep 29): in-run live fetch, fingerprint parity, and the State848 frontier
+
+With a real script key supplied, the whole chain advanced several steps. The
+pieces below are all in `tools/luarmor_two_phase.py` + `runtime/envlog.luau`.
+
+### The recovered Luraph environment fingerprint
+
+The bootstrap's anti-tamper includes a **fingerprint script** (recovered
+externally, kept at `luarmor_run_key/fingerprint_input.lua` in the workspace):
+cclosure checks on every builtin (`string.pack`, `task.*`, `debug.*`...),
+`"The metatable is locked"` metatables on userdata (Instance/Vector3/Random/
+Enum/EnumItem...), HttpService/RunService shape, `Random:Clone()` stream
+semantics, `utf8.nfcnormalize/nfdnormalize`, and ~100 bytes of **Path2D
+curve math** over per-run-randomized control points (frame size varies per
+run, e.g. 159x288 vs 170x147). Its 148 output bytes feed the handshake.
+envlog passes all of it end-to-end (`FINGERPRINT-OK bytes=148`); one fix was
+required: RunService flag methods must also tolerate `rs.IsStudio()` dot
+calls (the recovered copy calls them with `.`).
+
+### Cross-run response replay is impossible by construction
+
+Phase 1 -> capture handshake URL -> live replay -> plant -> re-run in the
+same process does NOT work: `d` is byte-stable across runs but `b` carries a
+**24-bit allocation-derived nonce in its tail** that shifts whenever the
+driver plants anything (module compiles, plant allocations). A response
+decrypted under one nonce is garbage under the next. Verified byte-level:
+the planted URL and the requested URL matched in length and `d` but diverged
+in the nonce tail.
+
+### The fix: in-run live fetch (serve modes "plant"/"resume"/"plantdbg")
+
+The request handlers now **suspend the run** instead of failing: for a
+luarmor URL with no canned answer, the handler prints
+`NEEDFETCH <url>` + flush padding and `coroutine.yield("__LRMRES " .. url)`;
+`runMain` stashes the runner thread (`urls.__lrm_runner`) and returns
+("fetchwait"); the Python driver fetches the URL **live**, plants the
+response via serve mode "plant" (native-table payload -- no JSON decoder in
+the path, any size), and calls serve mode "resume", which resumes the exact
+thread. Same process = same nonce = the response decrypts. Plant entries
+accumulate in `urls.__lrm_plant` (a module local the anti-tamper snapshot
+cannot reach; string keys invisible to the ipairs dump; a dedicated
+top-level local would break the 200-register compile limit -- observed).
+The legacy readfile_map plant is obsolete: a build-time "PENDING" placeholder
+pre-empts the live path and (with a real key) the tamper's value restore
+brings it back mid-run (observed: response 1 returned the 7-byte placeholder).
+
+With that loop the full protocol runs in ONE process: handshake -> live
+630-byte session-response -> decrypt -> ... and the time_pin must track the
+loader: `_bsdata0` carries a ~now epoch build stamp that rotates with the
+loader file (the tool now derives `time_pin` from it; a 10-hour stale pin was
+another reject candidate).
+
+### Where it stands: State848
+
+With the real key the run still ends in the baked-in fail state UI
+("Loader Failed" / `" Lrmsfail, ... Error: State848"`) + Kick, followed by the
+KNOWN nested-proto deserializer crash (`Script:14` multiply-on-nil -- the
+same crash the devirt's own no-session run reproduces; the `proto[proto[3]]`
+lazy-buffer gap from section 13). Findings that bound the problem:
+
+- The fail-state message is a **literal** (not `"State" .. n`), and the
+  decrypted verdict never reaches `HttpService:JSONDecode` -- the verdict is
+  parsed inside the VM with no library calls: the call-log ring (armed after
+  the fingerprint; the frozen-stdlib swap + string-metatable rebind in
+  `CHAIN.armCallLog` now works) records **zero** string/table/bit32/buffer
+  calls from the decrypt, i.e. the cipher is pure VM arithmetic on captured
+  locals. Library interception cannot see the plaintext.
+- The 9,333-line lift (reproduced: `node deob.js
+  gdrive_in/Luarmor/stub/sephal_v4.lua --cfg-json @/tmp/sephal_cfg.json -o
+  sephal_lift_v4.lua`) covers the bootstrap's outer logic; the session
+  handling lives in the nested protos behind `luraph_runtime1(tbl7[...],
+  buffer.fromstring("..."))` calls.
+
+Next wave (unchanged from section 13's plan, now with better tooling): lift
+the nested protos (force-decode for metatable-less tracked tables) to read
+the verdict checks + the response cipher statically; alternatively diff a
+real-executor run's `d`/fingerprint bytes against the sandbox's to find what
+the server rejects.

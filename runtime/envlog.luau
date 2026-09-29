@@ -1742,27 +1742,68 @@ local function onCall(p, ...)
         -- values { status = 200, body = "...", headers = {} } (headers optional).
         -- A key ending in '*' matches any url with that prefix (requests whose
         -- query carries a per-run nonce can still be answered)
-        if CFG.http_map and R.type(a1) == "string"
+        -- the urls.__lrm_plant list serves here too (HttpGet-based protocol
+        -- rounds): full-URL prefix matched, any host, tamper-proof. After a
+        -- live-fetch suspension the loop re-scans, so plant hits supersede.
+        if R.type(a1) == "string"
                 and (name == "HttpGet" or name == "HttpGetAsync" or name == "GetAsync" or name == "RequestAsync") then
-                local hit = CFG.http_map["GET " .. a1] or CFG.http_map[a1]
-                if hit == nil then
-                        for k, v in R.next, CFG.http_map do
-                                if R.type(k) == "string" and #k > 1 and R.sub(k, #k, #k) == "*" then
-                                        local pfx = R.sub(k, 1, #k - 1)
-                                        if R.sub(a1, 1, #pfx) == pfx or ("GET " .. a1):sub(1, #pfx) == pfx then
-                                                hit = v
-                                                break
+                local liveTries = 0
+                while true do
+                        local list = urls.__lrm_plant
+                        if R.type(list) == "table" then
+                                local served
+                                for i = 1, #list do
+                                        local plant = list[i]
+                                        if R.type(plant) == "table" and R.type(plant.body) == "string" then
+                                                local u = plant.url
+                                                if u == nil or (R.type(u) == "string" and R.sub(a1, 1, #u) == u) then
+                                                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
+                                                        comment(calleeText .. " -> canned via urls[" .. i .. "] ("
+                                                                .. R.tostring(#plant.body) .. " bytes, .." .. R.sub(a1, -10) .. ")")
+                                                        served = true
+                                                        if name == "HttpGet" then return plant.body end
+                                                        return { Success = true, StatusCode = 200,
+                                                                Headers = plant.headers or {}, Body = plant.body }
+                                                end
                                         end
                                 end
+                                _ = served
                         end
-                end
-                if hit then
-                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
-                        comment(calleeText .. " -> canned " .. R.tostring(hit.status or 200)
-                                .. " (" .. R.tostring(#R.tostring(hit.body or "")) .. " bytes)")
-                        if name == "HttpGet" then return hit.body end
-                        return { Success = true, StatusCode = hit.status or 200,
-                                Headers = hit.headers or {}, Body = hit.body }
+                        if CFG.http_map then
+                                local hit = CFG.http_map["GET " .. a1] or CFG.http_map[a1]
+                                if hit == nil then
+                                        for k, v in R.next, CFG.http_map do
+                                                if R.type(k) == "string" and #k > 1 and R.sub(k, #k, #k) == "*" then
+                                                        local pfx = R.sub(k, 1, #k - 1)
+                                                        if R.sub(a1, 1, #pfx) == pfx or ("GET " .. a1):sub(1, #pfx) == pfx then
+                                                                hit = v
+                                                                break
+                                                        end
+                                                end
+                                        end
+                                end
+                                if hit then
+                                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
+                                        comment(calleeText .. " -> canned " .. R.tostring(hit.status or 200)
+                                                .. " (" .. R.tostring(#R.tostring(hit.body or "")) .. " bytes)")
+                                        if name == "HttpGet" then return hit.body end
+                                        return { Success = true, StatusCode = hit.status or 200,
+                                                Headers = hit.headers or {}, Body = hit.body }
+                                end
+                        end
+                        -- live-fetch suspension for Luarmor endpoints: suspend
+                        -- the run, the serve driver fetches + plants, resume
+                        -- re-scans the plant list above
+                        if R.find(a1, "luarmor", 1, true)
+                                and CFG.serve and SERVE_PAD and coroutine.isyieldable()
+                                and liveTries < 4 then
+                                liveTries += 1
+                                R.print(MARK .. "NEEDFETCH " .. a1)
+                                R.print(SERVE_PAD)
+                                coroutine.yield("__LRMRES " .. a1)
+                        else
+                                break
+                        end
                 end
         end
         if name == "HttpGet" or name == "HttpGetAsync" or name == "HttpPost" or name == "HttpPostAsync"
@@ -2019,6 +2060,12 @@ function methodFn(p, k)
         f = function(...)
                 local self = ...
                 if not isP(self) then
+                        -- the recovered Luarmor fingerprint copy probes the
+                        -- RunService flags with '.' (rs.IsStudio()); the flag
+                        -- table is the whole answer, so tolerate no self there
+                        if RUNSERVICE_BOOL[k] ~= nil then
+                                return RUNSERVICE_BOOL[k]
+                        end
                         R.error("Expected ':' not '.' calling member function " .. k, 0)
                 end
                 return PMT.__call(indexP(self, k), ...)
@@ -3431,14 +3478,76 @@ local function httpRequest(label)
                 -- the sephal anti-tamper nils new CFG/http_map fields mid-run
                 -- but preserves CFG.readfile_map (shallow snapshot: shared
                 -- table reference) -- serve the session response from it
-                if R.type(opts.Url) == "string" and R.find(opts.Url, "x.luarmor", 1, true) and R.type(CFG.readfile_map) == "table" then
-                        local body = CFG.readfile_map["__lrm_session_response"]
-                        if body then
-                                local okh, hdrs = R.pcall(function() return R.json.decode(
-                                        CFG.readfile_map.__lrm_session_headers or "{}") end)
-                                comment(label .. " -> canned via readfile_map (" .. R.tostring(#body) .. " bytes)")
+                -- 0) the urls.__lrm_plant list: live-captured responses planted
+                -- by the serve driver, full-URL prefix matched, ANY host
+                -- (x.luarmor.net handshakes, cdn.luarmor.net client chunks).
+                -- `urls` on purpose: a module local (declared before every
+                -- handler) that the script env cannot reach; its string keys
+                -- never appear in the ipairs dump, and the sephal anti-tamper
+                -- snapshot only covers the script-visible env + CFG/CHAIN
+                -- fields. A dedicated top-level local would exceed the
+                -- 200-register compile limit (observed).
+                -- Each protocol round (handshake -> retry -> client fetch) is
+                -- a distinct entry keyed by its full URL.
+                if R.type(opts.Url) == "string" and R.type(urls.__lrm_plant) == "table" then
+                        local list = urls.__lrm_plant
+                        local matched = false
+                        for i = 1, #list do
+                                local plant = list[i]
+                                if R.type(plant) == "table" and R.type(plant.body) == "string" then
+                                        local u = plant.url
+                                        if u == nil or (R.type(u) == "string" and R.sub(opts.Url, 1, #u) == u) then
+                                                comment(label .. " -> canned via urls[" .. i .. "] ("
+                                                        .. R.tostring(#plant.body) .. " bytes, .." .. R.sub(opts.Url, -10) .. ")")
+                                                matched = true
+                                                return { Success = true, StatusCode = 200,
+                                                        Headers = plant.headers or {}, Body = plant.body }
+                                        end
+                                end
+                        end
+                        if not matched then
+                                -- diagnostics: the anti-tamper restores handler
+                                -- upvalues mid-run -- report what survived here
+                                local u0 = list[1]
+                                if R.type(u0) == "table" and R.type(u0.url) == "string" then
+                                        local w = u0.url
+                                        local diff
+                                        for i = 1, R.math.min(#w, #opts.Url) do
+                                                if R.byte(w, i) ~= R.byte(opts.Url, i) then
+                                                        diff = i
+                                                        break
+                                                end
+                                        end
+                                        comment(label .. " -> plant MISS n=" .. R.tostring(#list)
+                                                .. " len=" .. R.tostring(#w) .. "/" .. R.tostring(#opts.Url)
+                                                .. " firstdiff=" .. R.tostring(diff)
+                                                .. (diff and (" w=" .. R.sub(w, R.math.max(1, diff - 8), diff + 8)
+                                                        .. " r=" .. R.sub(opts.Url, R.math.max(1, diff - 8), diff + 8)) or ""))
+                                else
+                                        comment(label .. " -> plant MISS n=" .. R.tostring(#list)
+                                                .. " u0=" .. R.type(u0))
+                                end
+                        end
+                end
+                if R.type(opts.Url) == "string" and R.find(opts.Url, "x.luarmor", 1, true) then
+                        -- 1) legacy readfile_map plant (survives the shallow snapshot but a
+                        -- value restore mid-run can bring the placeholder back -- observed
+                        -- with a real script key: response 1 came back as "PENDING")
+                        local hit
+                        if R.type(CFG.readfile_map) == "table" then
+                                local body = CFG.readfile_map["__lrm_session_response"]
+                                if body then
+                                        local okh, hdrs = R.pcall(function() return R.json.decode(
+                                                CFG.readfile_map.__lrm_session_headers or "{}") end)
+                                        hit = { body = body, headers = (okh and hdrs) or {},
+                                                legacy = true }
+                                end
+                        end
+                        if hit then
+                                comment(label .. " -> canned via readfile_map ("
+                                        .. R.tostring(#hit.body) .. " bytes)")
                                 return { Success = true, StatusCode = 200,
-                                        Headers = (okh and hdrs) or {}, Body = body }
+                                        Headers = hit.headers or {}, Body = hit.body }
                         end
                 end
                 if CFG.http_map and R.type(opts.Url) == "string" then
@@ -3464,6 +3573,27 @@ local function httpRequest(label)
                                         Headers = hit.headers or {}, Body = hit.body }
                         end
                 end
+                -- no canned answer: for Luarmor endpoints, suspend the run for
+                -- a LIVE fetch by the serve driver. The driver plants the
+                -- response and resumes this exact thread -- the same process,
+                -- the same handshake nonce, so the response decrypts. Cross-
+                -- run replay cannot work: b embeds a 24-bit allocation-derived
+                -- nonce that shifts whenever the driver plants anything.
+                if R.type(opts.Url) == "string" and R.find(opts.Url, "luarmor", 1, true)
+                        and CFG.serve and SERVE_PAD and coroutine.isyieldable() then
+                        local tries = urls.__lrm_tries or {}
+                        urls.__lrm_tries = tries
+                        local n = (tries[opts.Url] or 0) + 1
+                        tries[opts.Url] = n
+                        if n <= 4 then
+                                R.print(MARK .. "NEEDFETCH " .. opts.Url)
+                                R.print(SERVE_PAD)
+                                coroutine.yield("__LRMRES " .. opts.Url)
+                                -- resumed with the response planted: re-enter
+                                -- the handler from the top (plant scan hits now)
+                                return httpRequest(label)(...)
+                        end
+                end
                 return callP(label .. "(" .. fmt(opts) .. ")", "response", "table")
         end
 end
@@ -3486,7 +3616,11 @@ if CFG.call_log then
         local function summ(v)
                 local t = R.type(v)
                 if t == "string" then
-                        return "s" .. #v .. ":" .. R.gsub(R.sub(v, 1, 28), "%c", "?")
+                        -- CFG.call_log_full: capture whole arguments (research:
+                        -- the decrypted session plaintext walks through here)
+                        local lim = CFG.call_log_full and 4000 or 28
+                        local head = R.sub(v, 1, lim)
+                        return "s" .. #v .. ":" .. R.gsub(head, "%c", "?")
                 elseif t == "number" then
                         return R.tostring(v)
                 end
@@ -3522,6 +3656,12 @@ if CFG.call_log then
                 wraplib("math", E.math)
                 wraplib("table", E.table)
                 if E.buffer then wraplib("buffer", E.buffer) end
+                -- method-syntax calls (s:byte()) route through the string
+                -- metatable, not the env binding: rebind it to the wrapped
+                -- copy (safe: the stack-depth canaries have already run)
+                if E.string then
+                        R.pcall(function() debug.setmetatable("", { __index = E.string }) end)
+                end
         end
         CHAIN.dumpCallLog = function()
                 local start = rn - 4000
@@ -4977,12 +5117,27 @@ TRAMP_ENV = ENV
 for _, t in TRAMPS do R.setfenv(t, ENV) end
 -- the run section is a function so its locals get a fresh register frame:
 -- the top-level chunk is at the 200-local limit (Studio enforces it)
-local function runMain()
-local chunk, cerr = R.loadstring(__SOURCE, "=Script")
+local function runMain(resumeRunner)
+local chunk, cerr
+local runner, rs
+local fetchwait = false
+if resumeRunner then
+        -- serve mode "resume": continue a run suspended for a live fetch
+        runner = urls.__lrm_runner
+        urls.__lrm_runner = nil
+        chunk = true
+        if R.type(runner) ~= "thread" then
+                chunk = nil
+                cerr = "no suspended run"
+        end
+else
+        chunk, cerr = R.loadstring(__SOURCE, "=Script")
+end
 local status
 if not chunk then
-        status = "compile error: " .. R.tostring(cerr)
+        status = (resumeRunner and "resume error: " or "compile error: ") .. R.tostring(cerr)
 else
+        if not resumeRunner then
         if CFG.prelude then
                 -- --cfg prelude=CODE: runs first (not traced); G = _G, genv = getgenv(),
                 -- e.g. "rawset(G, 'webhook', 'x')" for scripts that read settings,
@@ -5012,12 +5167,24 @@ else
                 return R.tostring(e) .. "\n" .. debug.traceback()
         end
         -- Roblox runs scripts in their own thread; here that thread's globals are ENV
-        local runner = coroutine.create(function()
+        runner = coroutine.create(function()
                 R.setfenv(0, ENV)
                 return R.xpcall(chunk, handler)
         end)
-        local rs = table.pack(coroutine.resume(runner))
+end -- if not resumeRunner (first-run-only setup)
+-- one resume per serve call: a "__LRMRES" yield suspends the whole run
+-- for a live fetch (the driver plants the response, then calls mode
+-- "resume" with this exact thread -- the same process, the same nonce)
+while true do
+        rs = table.pack(coroutine.resume(runner))
         if rs[1] and rs[2] == ABORT and coroutine.status(runner) == "suspended" then rs = { false, ABORT, n = 2 } end
+        if rs[1] and R.type(rs[2]) == "string" and R.sub(rs[2], 1, 9) == "__LRMRES " then
+                urls.__lrm_runner = runner
+                fetchwait = true
+        end
+        break
+end
+if not fetchwait then
         R.pcall(CHAIN.syncGenv)
         local mainOk = rs[1] and rs[2] ~= false or (rs[1] and coroutine.status(runner) == "suspended")
         local r2 = coroutine.create(function()
@@ -5050,6 +5217,14 @@ else
         else
                 status = "script error: " .. R.tostring(err)
         end
+        end -- if not fetchwait
+end -- chunk ok
+
+if fetchwait then
+        -- the run stays alive in urls.__lrm_runner; the driver plants the
+        -- response and calls serve mode "resume" to continue this run
+        R.print(SERVE_PAD)
+        return "fetchwait"
 end
 
 local body = render()
@@ -5200,6 +5375,94 @@ if CFG.serve then
                         -- in a plain run, and a coroutine inherits that depth (Script42
                         -- nests 197 coroutine.wrap calls, which then hit "C stack overflow")
                         runMain()
+                        return
+                end
+                if mode == "resume" then
+                        -- continue a run suspended for a live fetch (see the
+                        -- NEEDFETCH contract in the request handlers): the
+                        -- driver planted the response and re-enters here. The
+                        -- run may suspend again for the next protocol round;
+                        -- the dump only prints when the run truly finishes.
+                        runMain(true)
+                        return
+                end
+                if mode == "plantdbg" then
+                        -- inspect the plant list state (serve-driver diagnostics)
+                        local function chk(s)
+                                local h = 0
+                                for i = 1, #s do h = (h + R.byte(s, i) * i) % 65536 end
+                                return h
+                        end
+                        local list = urls.__lrm_plant
+                        if R.type(list) ~= "table" then
+                                R.print(MARK .. "PLANTDBG none")
+                        else
+                                R.print(MARK .. "PLANTDBG entries=" .. R.tostring(#list))
+                                for i = 1, #list do
+                                        local e = list[i]
+                                        if R.type(e) == "table" and R.type(e.body) == "string" then
+                                                R.print(MARK .. "  [" .. i .. "] body=" .. R.tostring(#e.body)
+                                                        .. " url=" .. (R.type(e.url) == "string"
+                                                                and (R.tostring(#e.url) .. " chk=" .. R.tostring(chk(e.url))
+                                                                        .. " " .. R.sub(e.url, 1, 48) .. ".." .. R.sub(e.url, -10))
+                                                                or R.tostring(e.url)))
+                                        else
+                                                R.print(MARK .. "  [" .. i .. "] MALFORMED type=" .. R.type(e)
+                                                        .. "/" .. R.type(e and e.body))
+                                        end
+                                end
+                        end
+                        R.print(SERVE_PAD)
+                        return
+                end
+                if mode == "plant" and (R.type(req) == "table"
+                        or (R.type(req) == "string" and #req > 0)) then
+                        -- tamper-proof response planting. req is EITHER a
+                        -- native table {url=?, body=str, headers=?} (preferred:
+                        -- no JSON decoder in the path, any size) OR a JSON
+                        -- string with the same fields (raw body also accepted).
+                        -- Entries accumulate in urls.__lrm_plant (the
+                        -- bootstrap's anti-tamper snapshot cannot see or
+                        -- restore them): one entry per protocol round, keyed
+                        -- by full URL; a same-URL plant replaces its entry.
+                        local bodyv, headerv, urlv
+                        if R.type(req) == "table" then
+                                bodyv = R.type(req.body) == "string" and req.body or nil
+                                headerv = R.type(req.headers) == "table" and req.headers or {}
+                                urlv = R.type(req.url) == "string" and req.url or nil
+                        else
+                                local okp3, parsed3 = R.pcall(function() return R.json.decode(req) end)
+                                bodyv, headerv, urlv = req, {}, nil
+                                if okp3 and R.type(parsed3) == "table" and R.type(parsed3.body) == "string" then
+                                        bodyv = parsed3.body
+                                        urlv = parsed3.url
+                                        if R.type(parsed3.headers) == "table" then headerv = parsed3.headers end
+                                end
+                        end
+                        local list = urls.__lrm_plant
+                        if R.type(bodyv) ~= "string" then
+                                R.print(MARK .. "PLANT-BAD (no body)")
+                                R.print(SERVE_PAD)
+                                return
+                        end
+                        if R.type(list) ~= "table" then list = {}; urls.__lrm_plant = list end
+                        local replaced = false
+                        if R.type(urlv) == "string" then
+                                for i = 1, #list do
+                                        local e = list[i]
+                                        if R.type(e) == "table" and e.url == urlv then
+                                                list[i] = { body = bodyv, headers = headerv, url = urlv }
+                                                replaced = true
+                                                break
+                                        end
+                                end
+                        end
+                        if not replaced then
+                                R.insert(list, { body = bodyv, headers = headerv, url = urlv })
+                        end
+                        R.print(MARK .. "PLANT-OK " .. R.tostring(#bodyv) .. " entries="
+                                .. R.tostring(#list) .. " url=" .. R.tostring(urlv ~= nil and #urlv or -1))
+                        R.print(SERVE_PAD)
                         return
                 end
                 if mode == "fetch" then

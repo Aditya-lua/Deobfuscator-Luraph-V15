@@ -82,10 +82,18 @@ function evalCond(cond, varName, value) {
 function findDispatchers(root) {
   const found = [];
   walkAst(root, n => {
-    if (n.type !== 'AstStatWhile') return;
-    const cond = n.condition;
-    if (!cond || cond.type !== 'AstExprConstantBool' || !cond.value) return;
-    const body = n.body.body;
+    let body = null;
+    if (n.type === 'AstStatWhile') {
+      const cond = n.condition;
+      if (!cond || cond.type !== 'AstExprConstantBool' || !cond.value) return;
+      body = n.body.body;
+    } else if (n.type === 'AstStatRepeat') {
+      // repeat ... until false: Luraph v15 dispatch form (some builds)
+      const cond = n.condition;
+      if (!cond || cond.type !== 'AstExprConstantBool' || cond.value) return;
+      body = n.body ? n.body.body : null;
+    }
+    if (!body) return;
     if (body.length < 2) return;
     const st = body[0];
     if (!['AstStatLocal', 'AstStatAssign'].includes(st.type)) return;
@@ -97,7 +105,8 @@ function findDispatchers(root) {
       opname = localName(st.vars[0]);
       if (!opname) return;
     }
-    const v = st.values[0];
+    let v = st.values ? st.values[0] : null;
+    if (v && v.type === 'AstExprGroup') v = v.expr;   // e.g. local y=(V[W])
     if (!v || v.type !== 'AstExprIndexExpr') return;
     const arr = localName(v.expr), pc = localName(v.index);
     if (!arr || !pc || body[1].type !== 'AstStatIf') return;
@@ -181,7 +190,7 @@ function closureEntries(root) {
     if (!n || typeof n !== 'object') return;
     if (Array.isArray(n)) { n.forEach(v => walk(v, stack)); return; }
     if (n.type === 'AstExprFunction') stack = [...stack, n];
-    if (n.type === 'AstStatWhile' && dispNodes.includes(n)) {
+    if (dispNodes.includes(n)) {
       const inner = [...stack].reverse().find(f => f.vararg && (!f.args || f.args.length === 0));
       const outer = [...stack].reverse().find(f => f.args && f.args.length >= 2);
       if (inner && outer) {
@@ -238,6 +247,23 @@ function _captures(info) {
   return Object.keys(names).filter(nm => !dup.has(nm) && (byName[nm] || []).length === 1).sort();
 }
 
+function _freeNames(fn) {
+  // names used inside `fn` whose declaration lives OUTSIDE it (free upvalues)
+  const own = new Set(Object.keys(_declsIn(fn)));
+  const names = new Set();
+  function visit(n) {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(visit); return; }
+    if (n.type === 'AstExprLocal' && n.local && !own.has(n.local.location)) {
+      names.add(n.local.name);
+    }
+    Object.values(n).forEach(visit);
+  }
+  visit(fn.body);
+  (fn.args || []).forEach(a => own.add(a.location));
+  return [...names].sort();
+}
+
 function makerInfo(root) {
   const dispNodes = findDispatchers(root).map(d => d.node);
   const out = new Map();
@@ -248,12 +274,13 @@ function makerInfo(root) {
     const t = n.type;
     if (t === 'AstExprFunction') stack = [...stack, n];
     if (t && t.startsWith('AstStat')) stmts = [...stmts, [n, stack.length]];
-    if (t === 'AstStatWhile' && dispNodes.includes(n)) {
+    if (dispNodes.includes(n)) {
 
       let oi = -1;
       for (let i = stack.length - 1; i >= 0; i--) {
         if ((stack[i].args || []).length >= 2) { oi = i; break; }
       }
+      let registered = false;
       if (oi >= 0 && oi + 1 < stack.length) {
         const clo = stack[oi + 1];
         const makerStmts = stmts.filter(([, d]) => d === oi + 1).map(([s]) => s);
@@ -273,9 +300,38 @@ function makerInfo(root) {
                   pf_key: stack[oi].args[pi].name,
                   maker: stack[oi], vm: clo, stmt: st,
                 });
+                registered = true;
               }
             }
           });
+        }
+      }
+      // v3 fallback (dispatch-local proto): some Luraph v15 builds decode the
+      // proto INSIDE the dispatcher itself -- `C=function(...) local
+      // P,W,o,Y,N=A[113](x),(1); repeat local y=(V[W]) ... end` -- so the
+      // sephal-era maker-assign hook has no match. Hook AFTER the
+      // dispatcher's first local instead: P is the live proto, and the free
+      // upvalues (A, V, x, ...) are the VM state worth capturing.
+      if (!registered) {
+        const clo = stack[stack.length - 1];
+        if (clo && clo.vararg && (!clo.args || clo.args.length === 0)) {
+          const first = clo.body && clo.body.body && clo.body.body[0];
+          const second = clo.body && clo.body.body && clo.body.body[1];
+          if (first && second && first.type === 'AstStatLocal' && first.vars && first.vars[0]) {
+            const pv = first.vars[0].name;
+            const [l2, c2] = loc(second);   // insert at START of statement 2 (after stmt 1's separator)
+            const key = `v3:${l2},${c2}`;
+            if (!out.has(key)) {
+              const shadowed = new Set((first.vars || []).map(v2 => v2.name));
+              const caps = _freeNames(clo).filter(nm2 => !shadowed.has(nm2));
+              out.set(key, {
+                at: [l2, c2], var: pv, proto: pv, mode: 'dispatch_local',
+                pf_key: JSON.stringify(`disp@${l2},${c2}`),
+                maker: stack.length >= 2 ? stack[stack.length - 2] : null,
+                vm: clo, stmt: first, captures: caps,
+              });
+            }
+          }
         }
       }
     }
@@ -283,7 +339,9 @@ function makerInfo(root) {
   }
   walk(root, [], []);
   const results = [...out.values()];
-  results.forEach(info => { info.captures = _captures(info); });
+  results.forEach(info => {
+    if (info.mode !== 'dispatch_local') info.captures = _captures(info);
+  });
   return results;
 }
 
@@ -311,6 +369,7 @@ function patchEntries(source, filePath, chunkTag) {
     const cap = info.captures.map(nm => `__PA[${pv}].${nm}=${nm};`).join('');
     code += `if __PA and not __PA[${pv}] then __PA[${pv}]={};__PA.n=__PA.n+1;__PA[${pv}].__seq=__PA.n;` +
             `__PA[${pv}].__maker="${tag}@${l2},${c2}";__PK[${pfKey}]=${v};${cap} end `;
+    if (info.mode === 'dispatch_local') code = code + ' ';   // standalone statement at stmt-2 start
     edits.push([l2, c2, code]);
   }
 

@@ -57,6 +57,7 @@ async function run(job) {
       devirt: devirtOn,
     };
     if (args.inputText) cfg.input_text = args.inputText;
+    if (args.preludeFile) cfg.prelude = require('fs').readFileSync(args.preludeFile, 'latin1');
     if (args.noFold) cfg.fold = false;
     if (spin) cfg.spin = SPIN_CHECKS;
     if (args.cfgJson) Object.assign(cfg, args.cfgJson);

@@ -322,10 +322,18 @@ function patchEntries(source, filePath, chunkTag) {
 }
 
 function patchSpin(src) {
-  return src.replace(
+  const INJ = '__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;';
+  // classic:  while true do X=Y[Z];            (Luraph v15 dispatch)
+  let out = src.replace(
     /while true do (?:local )?[A-Za-z_]+(?:,[A-Za-z_]+)*=[A-Za-z_]+\[[A-Za-z_]+\];/g,
-    m => m + '__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;'
+    m => m + INJ
   );
+  // repeat form:  repeat local y=(V[W]);       (Luraph v15 dispatch, some builds)
+  out = out.replace(
+    /repeat (?:local )?[A-Za-z_]+=\([A-Za-z_]+\[[A-Za-z_]+\]\);/g,
+    m => m + INJ
+  );
+  return out;
 }
 
 module.exports = {

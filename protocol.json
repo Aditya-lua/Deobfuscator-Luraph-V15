@@ -8,7 +8,7 @@
   },
   "nonce_hex_bytes": 8,
   "heartbeat_seconds": 2,
-  "stall_seconds": 20,
+  "stall_seconds": 600,
   "markers": [
     "ENVLOG-BEGIN",
     "ENVLOG-END",

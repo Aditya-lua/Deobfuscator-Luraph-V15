@@ -226,25 +226,58 @@ function _declsIn(fn) {
   return keys;
 }
 
+function _locStart(key) {
+  const [l, c] = String(key).split(' - ')[0].split(',').map(Number);
+  return [l, c];
+}
+
 function _captures(info) {
   const makerDecls = _declsIn(info.maker);
-  const used = {};
+  // v14.9-style builds nest the maker inside a helper method; the VM closure
+  // reads the helper's parameters/locals (e.g. its state table) which are NOT
+  // the maker's own decls. The capture code runs inside the maker where those
+  // names stay lexically visible, so record them too.
+  const chainDecls = {};
+  if (info.chain && info.chain.length) {
+    const mk = _locStart(info.maker.location);
+    info.chain.forEach(fn => {
+      Object.entries(_declsIn(fn)).forEach(([k, nm]) => {
+        const [l1, c1] = _locStart(k);
+        if (l1 < mk[0] || (l1 === mk[0] && c1 <= mk[1])) (chainDecls[nm] = chainDecls[nm] || []).push(k);
+      });
+    });
+  }
+
+  const usedMaker = {};   // decl key -> name, refs resolving into the maker
+  const usedChain = {};   // refs resolving into an enclosing scope
   function visit(n) {
     if (!n || typeof n !== 'object') return;
     if (Array.isArray(n)) { n.forEach(visit); return; }
     if (n.type === 'AstExprLocal') {
       const k = n.local.location;
-      if (makerDecls[k]) used[k] = makerDecls[k];
+      const nm = n.local.name;
+      if (makerDecls[k]) usedMaker[k] = nm;
+      else if (chainDecls[nm] && chainDecls[nm].includes(k)) usedChain[k] = nm;
     }
     Object.values(n).forEach(visit);
   }
   visit(info.vm);
-  const names = {};
-  Object.entries(used).forEach(([k, name]) => { (names[name] = names[name] || []).push(k); });
-  const dup = new Set(Object.entries(names).filter(([, ks]) => ks.length > 1).map(([n]) => n));
-  const byName = {};
-  Object.entries(makerDecls).forEach(([k, nm]) => { (byName[nm] = byName[nm] || []).push(k); });
-  return Object.keys(names).filter(nm => !dup.has(nm) && (byName[nm] || []).length === 1).sort();
+
+  function single(members, declsByName) {
+    // names whose refs hit exactly one decl, with exactly one decl of that
+    // name (by-name capture `__PA[p].nm=nm` must be unambiguous)
+    const refKeys = {};
+    Object.entries(members).forEach(([k, nm]) => { (refKeys[nm] = refKeys[nm] || []).push(k); });
+    return new Set(Object.keys(refKeys).filter(nm => refKeys[nm].length === 1 && (declsByName[nm] || []).length === 1));
+  }
+
+  const makerByName = {};
+  Object.entries(makerDecls).forEach(([k, nm]) => { (makerByName[nm] = makerByName[nm] || []).push(k); });
+  const caps = single(usedMaker, makerByName);
+  single(usedChain, chainDecls).forEach(nm => {
+    if (!(nm in makerDecls)) caps.add(nm);   // a maker decl would shadow it at the hook
+  });
+  return [...caps].sort();
 }
 
 function _freeNames(fn) {
@@ -299,6 +332,7 @@ function makerInfo(root) {
                   proto_index: pi, upvals_index: ui,
                   pf_key: stack[oi].args[pi].name,
                   maker: stack[oi], vm: clo, stmt: st,
+                  chain: stack.slice(0, oi),
                 });
                 registered = true;
               }
@@ -369,8 +403,12 @@ function patchEntries(source, filePath, chunkTag) {
     const cap = info.captures.map(nm => `__PA[${pv}].${nm}=${nm};`).join('');
     // __PA.n cap: dispatch-local protos are keyed by a FRESH table per call
     // (A[49](x)) -- without a cap every call re-registers 14 captures and
-    // __PA grows unbounded (observed: run crawls to a halt)
-    code += `if __PA and __PA.n<64 and ${pv}~=nil and not __PA[${pv}] then __PA[${pv}]={};__PA.n=__PA.n+1;__PA[${pv}].__seq=__PA.n;` +
+    // __PA grows unbounded (observed: run crawls to a halt). Standard makers
+    // register once per proto (`not __PA[pv]` guard), but a script can hold
+    // hundreds of distinct closures in its constant pool -- all of them need
+    // a capture, so only dispatch-local mode stays at the tight limit.
+    const palimit = info.mode === 'dispatch_local' ? 64 : 8192;
+    code += `if __PA and __PA.n<${palimit} and ${pv}~=nil and not __PA[${pv}] then __PA[${pv}]={};__PA.n=__PA.n+1;__PA[${pv}].__seq=__PA.n;` +
             `__PA[${pv}].__maker="${tag}@${l2},${c2}";__PK[${pfKey}]=${v};${cap} end `;
     if (info.mode === 'dispatch_local') code = code + ' ';   // standalone statement at stmt-2 start
     edits.push([l2, c2, code]);

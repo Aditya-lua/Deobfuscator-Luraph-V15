@@ -651,14 +651,59 @@ class State:
             d += 1
             k = k.get(link)
         return (self.mode, self.pc, d, self.jregs, self.ov.h if self.ov is not None else 0,
-                tuple((r, fmt_expr(l)) for r, l in self.packs), self.locs)
+                tuple((r, fmt_expr(l)) for r, l in self.packs),
+                tuple((kk, _carry_key(v)) for kk, v in self.locs))
 
-WALK_MAX_ERRORS = 100    
-WALK_RESTARTS = 64       
-WALK_LIMIT = int(os.environ.get("DEVIRT_WALK_LIMIT", 250000))       
+WALK_MAX_ERRORS = 100
+WALK_RESTARTS = 64
+WALK_LIMIT = int(os.environ.get("DEVIRT_WALK_LIMIT", 250000))
 
-MAX_STACK_DEPTHS = 8     
-STACK_WALK_MAX = 30000   
+def _carry_key(v):
+    """Canonical state-key form of a carried local's value (equal states must
+    merge even when the value objects differ, e.g. two Const(False))."""
+    if isinstance(v, RegFile):
+        return "RF"
+    if isinstance(v, EnvTable):
+        return "ENV"
+    if isinstance(v, LTable):
+        return "T%s" % v.tid
+    if isinstance(v, (Builtin, OpaqueFn)):
+        return repr(v)
+    if isinstance(v, ClosureExpr):
+        return "C<%s>" % (getattr(v.proto, "tid", None),)
+    if isinstance(v, Expr):
+        return fmt_expr(v)
+    if isinstance(v, str):
+        return sys.intern(v)
+    if v is None or isinstance(v, (bytes, int, float, bool)):
+        return v
+    return id(v)
+
+MAX_STACK_DEPTHS = int(os.environ.get('DEVIRT_MAX_DEPTHS', 8))
+STACK_WALK_MAX = 30000
+
+def _locs_lt(a, b):
+    """Ordering over carried-local tuples that never raises. The same local
+    can carry an int (the stack pointer) in one state and None in another,
+    and different states carry different key sets -- raw tuple comparison
+    raises (int < None). Keys compare first, then values on a total form."""
+    if a == b:
+        return False
+    def form(l):
+        ks, vs = [], []
+        for k, v in l:
+            ks.append((0, k, "") if isinstance(k, int) else (1, 0, str(k)))
+            c = _carry_key(v)
+            if isinstance(c, bool):
+                c = int(c)
+            if isinstance(c, (int, float)):
+                vs.append((0, c, ""))
+            elif c is None:
+                vs.append((1, 0, ""))
+            else:
+                vs.append((2, 0, str(c)))
+        return ks, vs
+    return form(a) < form(b)
 
 class ProtoLifter:
     """Steps the instructions of one proto."""
@@ -1384,6 +1429,10 @@ class ProtoLifter:
         if isinstance(obj, Expr):
             self.emit(Assign(Index(obj, self.as_expr(key)), self.value_of(v)))
             return
+        if obj is None:
+            # `t[k] = v` where t never materialized at capture (a nil slot of
+            # an uncaptured table): skip -- raising used to poison the walk
+            return
         raise Unsupported("newindex %r" % (obj,))
 
     def cur_ov(self):
@@ -1424,9 +1473,32 @@ class ProtoLifter:
                 if all(isinstance(k, int) or k == nkey for k in v.h):
                     items = [self.value_of(v.h.get(i)) for i in range(1, max((k for k in v.h if isinstance(k, int)), default=0) + 1)]
                     return SymList(items, None, nkey=nkey if nkey in v.h else None)
-                raise Unsupported("storing a non-empty VM table into a register")
+                return self.table_ctor(v)
             return S.NewTable()
+        if isinstance(v, RegFile):
+            # the caller's register frame passed as a call argument
+            # (`f(b, ...)`, v14.9's frame-holding decryptor calls)
+            return FrameArg(0)
         return self.as_expr(v)
+
+    def table_ctor(self, t):
+        """A VM table with hash keys -> a table constructor (config-style
+        tables the script builds at run time: `{url=..., method=...}`)."""
+        stack = self.__dict__.setdefault("_tbl_stack", set())
+        if id(t) in stack:
+            raise Unsupported("cyclic VM table")
+        stack.add(id(t))
+        try:
+            keys = sorted(t.h, key=lambda k: (not isinstance(k, int), k if isinstance(k, int) else repr(k)))
+            # a leading 1..n run of ints renders positionally, the rest keyed
+            n = 0
+            while n < len(keys) and keys[n] == n + 1:
+                n += 1
+            items = [(None, self.value_of(t.h[k])) for k in keys[:n]]
+            items += [(self.as_expr(k), self.value_of(t.h[k])) for k in keys[n:]]
+            return S.NewTable(items)
+        finally:
+            stack.discard(id(t))
 
     def call_builtin(self, fn, args, it, stat):
         name = fn.name
@@ -1611,8 +1683,11 @@ class ProtoLifter:
                 return self.make_closure(args, target)
             if node is not None:
                 return it.call_lua(LuaFunc(node, Scope()), args)
-            if fn.pf_tid is None:
-                raise Unsupported("call of unknown VM function lf%d" % fn.lfid)
+            # No AST node: a closure the trace never instantiated through a
+            # hooked maker (e.g. a plain, non-virtualized function kept in the
+            # VM's constant pool). Fall through and render the call through
+            # the SharedFn stub (luraph_runtimeN, defined as error(...)) --
+            # raising here would abort the lift of everything else.
 
         if isinstance(fn, Multi):
             fn = fn.first()
@@ -1654,6 +1729,17 @@ class ProtoLifter:
         pi, ui = vm.proto_index(), vm.upvals_index()
         proto = vals[pi] if len(vals) > pi else None
         ups = vals[ui] if len(vals) > ui else None
+        if not isinstance(proto, LTable) and vals and isinstance(vals[0], LTable):
+            # v14.9's closure op calls the maker positionally as
+            # (proto, upvals): `S[60](v, y)` -- the model's proto index points
+            # at the wrong slot for that convention. The proto table doubles
+            # as the child's VM state (k[3] = register count, k[6] = its
+            # instruction arrays), so the child lifts from it directly.
+            proto = vals[0]
+            ups = vals[1] if len(vals) > 1 else None
+            v149_proto_state = True
+        else:
+            v149_proto_state = False
         if self.walk_only and not isinstance(proto, LTable) and \
                 any(isinstance(x, Missing) for x in walk_expr(proto)):
 
@@ -1682,6 +1768,9 @@ class ProtoLifter:
                 entries.append(ups.get(i))
         c = ClosureExpr(proto, entries)
         c.vm = vm
+        if v149_proto_state:
+            # the child's VM state is its own proto table (see above)
+            c.state_table = proto
         for e in entries:
             if isinstance(e, MaybeBox):
                 self.captured_regs.add(e.reg)
@@ -2068,7 +2157,15 @@ class Stepper:
         self.first_inner = self.loops[0][0]
         self.gov = Overlay()
 
+        self._detect_regfile()
+        self._fix_vararg_pointers()
+
         self.carry = set()
+        # v14.9 splits instructions across dispatch iterations: a temp written
+        # in one handler (`p=(b)`) is read in a later one (`p=p[y]`). Seed the
+        # carry with every dispatch temp that is both read and written across
+        # the loop bodies, so cross-handler values persist in the state.
+        self.carry |= self._cross_handler_temps()
         self.read_first = set()
         self.written = set()
         self.not_carried = set()
@@ -2078,6 +2175,99 @@ class Stepper:
         if not hasattr(vm, "_mode_loop_cache"):
             vm._mode_loop_cache = {}
         self._mode_loop_cache = vm._mode_loop_cache
+
+    def _cross_handler_temps(self):
+        """Dispatch temps (declared valueless in the loop function) that some
+        handler reads and some handler writes: their values live across
+        instruction boundaries in this build."""
+        reads, writes = set(), set()
+        for _, _, w in self.loops:
+            for n in iter_nodes(w):
+                t = n.get("type")
+                if t == "AstExprLocal":
+                    reads.add(n["local"]["location"])
+                elif t == "AstStatLocal":
+                    for v in n.get("vars", []):
+                        writes.add(v["location"])
+                elif t == "AstStatAssign":
+                    for v in n.get("vars", []):
+                        if v.get("type") == "AstExprLocal":
+                            writes.add(v["local"]["location"])
+                elif t == "AstStatCompoundAssign":
+                    var = n.get("var")
+                    if isinstance(var, dict) and var.get("type") == "AstExprLocal":
+                        writes.add(var["local"]["location"])
+        out = set()
+        for st in self.vm.inner_body[:self.first_inner]:
+            if st.get("type") != "AstStatLocal" or st.get("values"):
+                continue
+            for v in st.get("vars", []):
+                k = v["location"]
+                if k in reads and k in writes:
+                    out.add(k)
+        return out
+
+    def _fix_vararg_pointers(self):
+        """The prologue places the entry varargs with a VM runtime helper
+        (`local w,W = S[59](...)`) the walk cannot evaluate (a stub call). At
+        closure entry the multret region is empty: the pointer local is 0 and
+        the value table empty, which is all the split handlers need."""
+        for st in self.vm.prologue:
+            if st.get("type") != "AstStatLocal":
+                continue
+            vals = st.get("values", [])
+            if len(vals) != 1 or vals[0].get("type") != "AstExprCall":
+                continue
+            call = vals[0]
+            args = call.get("args", [])
+            if len(args) != 1 or args[0].get("type") != "AstExprVarargs":
+                continue
+            vars_ = st.get("vars", [])
+            if len(vars_) != 2:
+                continue
+            vd, wd = vars_[0]["location"], vars_[1]["location"]
+            if isinstance(self.cs.vars.get(vd), TempVal):
+                self.cs.vars[vd] = 0
+            if isinstance(self.cs.vars.get(wd), TempVal):
+                self.cs.vars[wd] = LTable()
+
+    def _detect_regfile(self):
+        """v14.9 builds create the register file with a VM runtime helper call
+        in the prologue (`local b = S[32](w)` -- a plain function behind a
+        state-table slot), not a direct table.create(), so the walk sees a
+        stub call. Detect the prologue local the handlers use as the register
+        array -- element calls `b[v](...)`, numeric stores `b[...]=...`,
+        regfile copies `p=(b)` -- and model it as a RegFile."""
+        cands = {k for k, v in self.cs.vars.items() if isinstance(v, TempVal)}
+        if not cands:
+            return
+        calluse, storeuse, copysrc = set(), set(), set()
+        for _, _, w in self.loops:
+            for n in iter_nodes(w):
+                t = n.get("type")
+                if t == "AstExprCall":
+                    f = n.get("func")
+                    if isinstance(f, dict) and f.get("type") == "AstExprIndexExpr" \
+                            and f.get("expr", {}).get("type") == "AstExprLocal":
+                        calluse.add(f["expr"]["local"]["location"])
+                elif t in ("AstStatAssign", "AstStatCompoundAssign"):
+                    vs = n.get("vars") if t == "AstStatAssign" else [n.get("var")]
+                    for var in vs:
+                        if isinstance(var, dict) and var.get("type") == "AstExprIndexExpr" \
+                                and var.get("expr", {}).get("type") == "AstExprLocal":
+                            storeuse.add(var["expr"]["local"]["location"])
+                    if t == "AstStatAssign":
+                        for val in n.get("values", []):
+                            if isinstance(val, dict) and val.get("type") == "AstExprLocal":
+                                copysrc.add(val["local"]["location"])
+                elif t == "AstStatLocal":
+                    for val in n.get("values", []):
+                        if isinstance(val, dict) and val.get("type") == "AstExprLocal":
+                            copysrc.add(val["local"]["location"])
+        hits = [k for k in cands if k in calluse and (k in storeuse or k in copysrc)]
+        if len(hits) != 1:
+            return
+        self.cs.vars[hits[0]] = RegFile()
 
     def _stack_pointer_candidates(self):
         """Prologue locals the handlers use directly as a register index
@@ -2096,7 +2286,13 @@ class Stepper:
             cache[None] = pairs
         _, inner = self._fresh_scopes(None, S.Interp(self.lf))
         self.lf.out = []
-        regfiles = {k for k, v in inner.vars.items() if isinstance(v, RegFile)}
+        regfiles = set()
+        sc = inner
+        while sc is not None:
+            for k, v in sc.vars.items():
+                if isinstance(v, RegFile):
+                    regfiles.add(k)
+            sc = sc.parent
         return {i for r, i in cache[None] if r in regfiles} & set(inner.vars)
 
     def _local_value(self, loc, before):
@@ -2109,6 +2305,11 @@ class Stepper:
                     return st["values"][k]
         return None
 
+    def _sp_value(self, locs):
+        """The (int) stack-pointer value among the carried locals, if any."""
+        ints = [v for _, v in locs if isinstance(v, int) and not isinstance(v, bool)]
+        return ints[0] if ints else None
+
     def initial(self):
         it = S.Interp(self.lf)
         cs, inner = self._fresh_scopes(None, it)
@@ -2117,18 +2318,40 @@ class Stepper:
         ks = inner.lookup(self.vm.kstack_key) if self.vm.kstack_key else None
         locs = self._carried(inner)
         if locs:
-
-            self.lf.stack_base = min(v for _, v in locs)
+            sb = self._sp_value(locs)
+            if sb is not None:
+                self.lf.stack_base = sb
         return State(mode, pc, ks.vars[self.vm.kstack_key] if ks else None, locs=locs)
 
     def _carried(self, inner):
-        """State.locs: the carried locals' current values."""
+        """State.locs: the carried locals' current values. Values the state
+        cannot represent (impure/symbolic chains) are SKIPPED: the next
+        handler then sees nil, the pre-carry behaviour -- raising here would
+        discard the whole step's output."""
         out = []
         for k in sorted(self.carry):
             v = inner.vars.get(k)
-            if not (isinstance(v, int) and not isinstance(v, bool)):
-                raise Unsupported("symbolic value of a VM local carried between instructions (%r)" % (v,))
-            out.append((k, v))
+            if v is None or isinstance(v, (RegFile, EnvTable, LTable, Builtin, OpaqueFn, Opaque, Buf)):
+                # nil before first write; a register-file alias (v14.9's
+                # `p=(b)` holding the register array between handlers); the
+                # proto table, env, and other concrete VM values
+                out.append((k, v))
+                continue
+            if isinstance(v, (Reg, Pseudo, Global)):
+                # pure register reads / pseudo vars / env reads carried
+                # between v14.9's split handlers
+                out.append((k, v))
+                continue
+            if isinstance(v, Const) and (v.v is None or isinstance(v.v, (bool, int, float, bytes, str))):
+                out.append((k, v))
+                continue
+            if isinstance(v, (bytes, str)) or \
+                    (isinstance(v, (int, float)) and not isinstance(v, complex)):
+                # numbers and booleans (v14.9 carries e.g. the upvalue flag)
+                out.append((k, v))
+                continue
+            # uncarryable (symbolic chain, closure, temp): skip it
+            continue
         return tuple(out)
 
     def _fresh_scopes(self, state, it):
@@ -2218,8 +2441,8 @@ class Stepper:
             locs = self._carried(inner)
             sb = lf.stack_base
             if sb is not None and locs:
-
-                top = max(v for _, v in locs)
+                ints = [v for _, v in locs if isinstance(v, int) and not isinstance(v, bool)]
+                top = max(ints) if ints else -1
                 jr = tuple(sorted((k, v) for k, v in lf.jvals.items() if k not in lf.jread
                                   and not (isinstance(k, int) and k > top)))
             else:
@@ -2243,6 +2466,18 @@ class Stepper:
                 continue
             self.carry.add(k)
             self.new_carry = True
+        # v14.9: handler temps holding state across instructions (`p=(b)` in
+        # one handler, `p=p[y]` in a later one) -- carry only STABLE values:
+        # concrete VM objects, register reads, constants. Growing chains
+        # (Bin/Index built from the temp's own previous value) would explode
+        # the state space over loops, so they stay out.
+        for k in (self.read_first & self.written) - self.sp_cands - self.carry - self.not_carried - self.fixed_decls:
+            v = dict.get(acc, k)
+            if v is None or isinstance(v, (RegFile, EnvTable, LTable, Builtin, OpaqueFn, Opaque, Buf, bytes, str)) or \
+                    isinstance(v, (Reg, Pseudo, Global)) or \
+                    (isinstance(v, Const) and (v.v is None or isinstance(v.v, (bool, int, float, bytes, str)))):
+                self.carry.add(k)
+                self.new_carry = True
 
     def post_return(self, it, cs, values):
         """The handler returned from the protected function: run the code after it."""
@@ -2906,8 +3141,8 @@ class Program:
         states = {}         
         facts = {}          
         order = []
-        self.pred = {}
-        self.edges = {}     
+        pred = {}          # (walk-local: nothing reads these after the
+        edges = {}         #  walk; holding them through lower() OOM'd runs)
         work = [s0.key(link)]
         states[work[0]] = s0
         facts[work[0]] = {}
@@ -2988,15 +3223,22 @@ class Program:
                     continue
                 if ns.locs:
 
-                    if ns.pc != s.pc + 1 and s.locs and ns.locs < s.locs:
+                    if ns.pc != s.pc + 1 and s.locs and _locs_lt(ns.locs, s.locs):
                         hubs.add((s.mode, s.pc))
                     seen_locs = depth_at.setdefault((ns.mode, ns.pc), set())
-                    if ns.locs not in seen_locs and len(seen_locs) >= MAX_STACK_DEPTHS \
+                    # the depth limiter tracks the STACK POINTER value only:
+                    # keying on the whole locs tuple multiplied states wherever
+                    # a carried local held a concrete object (a decryptor's
+                    # buffer, an opaque helper), exhausting MAX_STACK_DEPTHS
+                    # on semantically equal states
+                    spv = st._sp_value(ns.locs)
+                    if spv not in seen_locs and len(seen_locs) >= MAX_STACK_DEPTHS \
                             and (ns.mode, ns.pc) not in hubs:
                         node.error = "stack depth %s at %s:%s (seen %s)" % (
-                            ns.locs[0][1], ns.mode, ns.pc, sorted(x[0][1] for x in seen_locs))
+                            st._sp_value(ns.locs), ns.mode, ns.pc,
+                            sorted(seen_locs, key=repr))
                         continue
-                    seen_locs.add(ns.locs)
+                    seen_locs.add(spv)
                 nk = ns.key(link)
 
                 core = nk[:5]
@@ -3006,11 +3248,11 @@ class Program:
                     if bad - lf.pack_unstable:
                         lf.pack_unstable |= bad
                         return s0, order, True
-                self.edges.setdefault(k, set()).add(nk)
+                edges.setdefault(k, set()).add(nk)
                 if nk not in facts:
                     facts[nk] = nf
                     states[nk] = ns
-                    self.pred[nk] = k
+                    pred[nk] = k
                     changed = True
                 else:
                     old = facts[nk]
@@ -3122,6 +3364,15 @@ class FunctionLifter:
         self.lifted.add(id(proto))
         prefix = REG_PREFIX[depth % len(REG_PREFIX)]
         cap = self.prog.dump.cap_by_self.get(proto.tid)
+        if cap is None and proto.tid is not None:
+            # v14.9: the closure op passes the proto as the maker's first arg,
+            # so the child's capture holds it under that name (keyed by its
+            # fresh upvalue table) -- adopt it when it really is this proto
+            st = self.prog.dump.cap_by_state.get(proto.tid)
+            if st is not None:
+                k0 = st.get(vm.maker["args"][0]["name"])
+                if isinstance(k0, LTable) and k0.tid == proto.tid:
+                    cap = st
         if cap is not None:
             # a captured child proto: its own state tables (W/V/...) beat the
             # parent's vmobj the recursive call would otherwise reuse
@@ -3156,7 +3407,7 @@ class FunctionLifter:
         drop_idle_closes(order, lf.captured_regs)
         lines, self.params, nerr, fallbacks = backend.lower(
             s0.key(vm.kstack_link), order, me, vm.kstack_link, prefix, upnames,
-            lambda x, names: self.closure(vm, vmobj, x, names, depth))
+            lambda x, names: self.closure(vm, vmobj, x, names, depth, lf))
         self.stats["fallbacks"] += fallbacks
         if os.environ.get("DEVIRT_DEBUG"):
             pid = self.prog.dump.pid_of_table.get(proto.tid)
@@ -3201,7 +3452,7 @@ class FunctionLifter:
                             uses.setdefault(e.idx, set()).update(regs)
         return uses
 
-    def closure(self, vm, vmobj, c, parent_names, depth):
+    def closure(self, vm, vmobj, c, parent_names, depth, parent_lf=None):
         import codegen as CG
         proto = c.proto
         if isinstance(proto, PlainProto):
@@ -3253,11 +3504,24 @@ class FunctionLifter:
         memo = self.__dict__.setdefault("_closure_memo", {})
         if ckey in memo:
             lines, params = memo[ckey]
+        elif os.environ.get("DEVIRT_SHALLOW"):
+            # memory escape hatch: lift each proto's own instructions only;
+            # children become markers that a per-proto --lift run fills in
+            # (deep single-process chains OOM the container)
+            pid = self.prog.dump.pid_of_table.get(proto.tid)
+            tag = "p%s" % pid if pid is not None else "t%s" % proto.tid
+            memo[ckey] = (["__DEVIRT_CHILD__(%s)" % tag], ["..."])
+            lines, params = memo[ckey]
         else:
             try:
+                sh = dict(getattr(c, "shared_cap", None) or {})
+                # a child without its own capture (a path the trace never
+                # took) still needs the VM's shared values (the state table
+                # S, ...): fall back to the parent's by-name captures
+                sh.update(getattr(parent_lf, "cap_fallback", {}) or {})
                 lines = self.lift(cvm, getattr(c, "state_table", None) or vmobj, proto,
                                   UpList(fidx), upnames, depth + 1,
-                                  shared=getattr(c, "shared_cap", None))
+                                  shared=sh)
                 params = self.params
             except Unsupported as ex:
                 lines = ["error(\"devirt: could not lift closure: %s\")" % str(ex).replace("\"", "'")]
@@ -3278,6 +3542,13 @@ class FunctionLifter:
                 params = ["..."]
             memo[ckey] = (lines, params)
         self.lifted.discard(id(proto))
+        # deep proto chains hold every level's lower() frame; collect the
+        # cyclic garbage periodically so the peak stays bounded
+        gc_counter = self.__dict__.setdefault("_gc_i", 0) + 1
+        self._gc_i = gc_counter
+        if gc_counter % 32 == 0:
+            import gc
+            gc.collect()
         f = CG.FuncE(["function(%s)" % ", ".join(params)] + ["\t" + l for l in lines] + ["end"])
         f.captures = set(upnames.values())
         return f

@@ -825,6 +825,8 @@ def extract_params(body):
             return CG.LocalName(names[x.i - 1]) if x.i <= n else Vararg(x.i - n)
         if isinstance(x, CG.TailRef) and isinstance(x.tail, VarargTail):
             return CG.TailRef(VarargTail(x.tail.start - n))
+        if isinstance(x, CG.TailCount) and isinstance(x.tail, VarargTail):
+            return CG.TailCount(VarargTail(x.tail.start - n))
         return None
     if n:
         map_body(body, fn, set())
@@ -856,6 +858,8 @@ def vararg_uses(stmts, idx, tails):
         if isinstance(x, Vararg):
             idx.append(x.i)
         elif isinstance(x, CG.TailRef) and isinstance(x.tail, VarargTail):
+            tails.append(x.tail.start)
+        elif isinstance(x, CG.TailCount) and isinstance(x.tail, VarargTail):
             tails.append(x.tail.start)
         return None
     map_body(stmts, f, set(), inspect_only=True)
@@ -921,7 +925,8 @@ def uses_varargs(stmts):
 
     def ex(e):
         for x in CG.walk(e):
-            if isinstance(x, Vararg) or (isinstance(x, CG.TailRef) and isinstance(x.tail, VarargTail)):
+            if isinstance(x, Vararg) or isinstance(x, CG.TailCount) \
+                    or (isinstance(x, CG.TailRef) and isinstance(x.tail, VarargTail)):
                 found[0] = True
 
     def multi(m):

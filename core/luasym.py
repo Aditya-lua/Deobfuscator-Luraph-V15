@@ -651,26 +651,29 @@ class Interp:
             c = self.eval(st["step"], scope) if st.get("step") else 1
             if is_sym(a) or is_sym(b) or is_sym(c):
                 raise Unsupported("numeric for with symbolic bounds")
-            i = a
-            n = 0
-            while (c > 0 and i <= b) or (c <= 0 and i >= b):
-                n += 1
-                if n > 1000000:
-                    raise Unsupported("for loop limit")
-                inner = Scope(scope)
-                inner.vars[st["var"]["location"]] = i
-                try:
-                    self.exec_block(st["body"]["body"], inner)
-                except BreakSig:
-                    break
-                except ContinueSig:
-                    pass
-                i = fix_int(i + c)
+            if a is None or b is None or c is None:
+                pass  # bound unknown at capture: skip, like a while with an unknown (falsy) condition
+            else:
+                i = a
+                n = 0
+                while (c > 0 and i <= b) or (c <= 0 and i >= b):
+                    n += 1
+                    if n > 1000000:
+                        raise Unsupported("for loop limit")
+                    inner = Scope(scope)
+                    inner.vars[st["var"]["location"]] = i
+                    try:
+                        self.exec_block(st["body"]["body"], inner)
+                    except BreakSig:
+                        break
+                    except ContinueSig:
+                        pass
+                    i = fix_int(i + c)
         elif t == "AstStatForIn":
             vals = self.eval_list(st["values"], scope, 3)
             f, s, ctl = vals
             n = 0
-            while True:
+            while f is not None:
                 n += 1
                 if n > 1000000:
                     raise Unsupported("for-in limit")

@@ -425,7 +425,8 @@ local function quote(s)
                 if c == '"' then return '\\"' end
                 if c == "\\" then return "\\\\" end
                 local b = R.byte(c)
-                if b >= 128 then return c end -- keep UTF-8 as-is
+                -- escape EVERYTHING non-printable as decimal: binary blobs
+                -- (e.g. _bsdata0) must survive the UTF-8 stdout pipe losslessly
                 return "\\" .. b
         end)
         return '"' .. out .. '"'

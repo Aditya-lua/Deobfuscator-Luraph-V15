@@ -39,7 +39,10 @@ def tag_of(prog, proto):
 
 def main():
     source, protos_path, shallow_path, out_path = sys.argv[1:5]
-    prog = devirt.Program(source, protos_path)
+    # optional extra sources: original text of loadstring'd VM chunks (their
+    # captured protos carry tags keyed by the chunk source hash)
+    chunk_paths = sys.argv[5:]
+    prog = devirt.Program(source, protos_path, chunk_paths)
     prog.requests = set()
 
     roots = devirt.program_roots(prog)

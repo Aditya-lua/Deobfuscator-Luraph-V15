@@ -207,12 +207,33 @@ function buildHarness(source, cfg, chunks = {}) {
 
 let LAST_RAW = '';
 
+// Turn an abnormal luau exit (crash / kill, with no protocol output) into an
+// actionable message. The bundled bin/luau is a native binary: if it was built
+// with -march=native on a newer host it can use CPU instructions (e.g. the
+// AVX-512 FP16 `vmovw`) that are absent here and fault with SIGILL, so every
+// run dies before printing anything. The remedy is a portable rebuild.
+function luauCrashDiagnostic(luau, code, signal, outputLen) {
+  if (outputLen > 0) return null;            // the script ran and said something
+  if (signal === 'SIGKILL') return null;     // our own watchdog timeout path
+  const how = signal ? ('killed by signal ' + signal)
+                     : (code ? ('exited with code ' + code) : null);
+  if (!how) return null;
+  let msg = 'luau (' + luau + ') ' + how + ' without producing any output.';
+  if (signal === 'SIGILL' || code === 132) {
+    msg += '\n    The bundled Luau binary uses CPU instructions this machine does'
+        +  ' not support (a non-portable -march=native build).'
+        +  '\n    Rebuild a portable one with:  python build_luau.py'
+        +  '\n    (or copy in a luau binary built for this CPU).';
+  }
+  return msg;
+}
+
 async function runOnce(luau, source, cfg, hpath, timeoutSec, keepHarness, chunks = {}) {
   cfg = Object.assign({ heartbeat: HEARTBEAT }, cfg);
   const harness = buildHarness(source, cfg, chunks);
   fs.writeFileSync(hpath, harness, 'latin1');
 
-  const { body, err } = await _communicate([luau, hpath], timeoutSec * 1000, STALL * 1000);
+  const { body, err, code, signal } = await _communicate([luau, hpath], timeoutSec * 1000, STALL * 1000);
 
   if (!keepHarness && fs.existsSync(hpath)) {
     try { fs.unlinkSync(hpath); } catch {}
@@ -222,7 +243,13 @@ async function runOnce(luau, source, cfg, hpath, timeoutSec, keepHarness, chunks
   LAST_RAW = stdout + err;
   const m = new RegExp(mark('ENVLOG-BEGIN') + '\\n([\\s\\S]*?)' + mark('ENVLOG-END')).exec(stdout);
   if (!m) {
-    return { body: null, err: stdout.slice(-3000) + '\n' + err.slice(-3000) };
+    // The Luau runtime never reached its first protocol marker. When it also
+    // produced no output at all, the binary itself died (a crash, or the OS
+    // killing it) rather than the analyzed script erroring -- report that
+    // plainly instead of throwing an empty Error.
+    const diag = luauCrashDiagnostic(luau, code, signal, stdout.length + err.length);
+    const tail = (stdout.slice(-3000) + '\n' + err.slice(-3000)).trim();
+    return { body: null, err: diag ? (tail ? diag + '\n' + tail : diag) : tail };
   }
   let result = m[1];
   for (const hp of [hpath, hpath.replace(/\\/g, '/')]) {
@@ -239,6 +266,7 @@ function _communicate(cmd, timeoutMs, stallMs) {
     const outBufs = [], errBufs = [];
     let lastOutput = Date.now();
     let done = false;
+    let exitCode = null, exitSignal = null;
 
     function finish() {
       if (done) return;
@@ -247,12 +275,14 @@ function _communicate(cmd, timeoutMs, stallMs) {
       resolve({
         body: Buffer.concat(outBufs).toString('utf8', 0, undefined),
         err: Buffer.concat(errBufs).toString('utf8', 0, undefined),
+        code: exitCode,
+        signal: exitSignal,
       });
     }
 
     proc.stdout.on('data', b => { outBufs.push(b); lastOutput = Date.now(); });
     proc.stderr.on('data', b => { errBufs.push(b); lastOutput = Date.now(); });
-    proc.on('close', finish);
+    proc.on('close', (code, signal) => { exitCode = code; exitSignal = signal; finish(); });
     proc.on('error', err => { errBufs.push(Buffer.from(err.message)); finish(); });
 
     const start = Date.now();

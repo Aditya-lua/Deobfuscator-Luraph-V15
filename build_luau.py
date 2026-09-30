@@ -10,7 +10,10 @@ fails with "attempt to index vector with 'Dot'".
 
 Needs git, cmake and a C++ compiler (MSVC via a developer prompt, or gcc,
 e.g. MSYS2's; Ninja is used when installed).
-    python build_luau.py [--tag 0.739] [--src DIR] [--portable] [--jobs N]
+    python build_luau.py [--tag 0.739] [--src DIR] [--native] [--jobs N]
+
+The default build is portable (generic x86-64); pass --native for a faster
+binary tuned to this machine's CPU that may not run elsewhere.
 """
 import argparse
 import os
@@ -60,8 +63,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument("--tag", default=TAG, help="Luau release tag (default %(default)s)")
     ap.add_argument("--src", help="existing checkout to use (default: fresh clone in a temp folder)")
+    # Portable (generic x86-64, no -march=native) is the default: a
+    # -march=native binary can bake in instructions the target CPU lacks (e.g.
+    # AVX-512 FP16 `vmovw`) and crash with SIGILL on every run. --native opts
+    # back into the faster host-tuned build for a binary that stays on this box.
     ap.add_argument("--portable", action="store_true",
-                    help="gcc: no -march=native (for a binary copied to another machine)")
+                    help="gcc: no -march=native (default; for a binary copied to another machine)")
+    ap.add_argument("--native", action="store_true",
+                    help="gcc: add -march=native (faster, but only runs on CPUs like the build host)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 2,
                     help="parallel build jobs (default: CPU count)")
     args = ap.parse_args()
@@ -81,7 +90,7 @@ def main():
         # MinGW/Linux gcc; static so the binary needs no compiler runtime DLLs.
         # Plain -O3 ran the pipeline ~30% slower than the official MSVC build;
         # with -march=native + LTO it is a bit faster (fetched.lua 33 s vs 35 s).
-        opt = "-O3 -flto" + ("" if args.portable else " -march=native")
+        opt = "-O3 -flto" + (" -march=native" if args.native and not args.portable else "")
         cfg += ["-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++",
                 "-DCMAKE_C_FLAGS_RELEASE=%s -DNDEBUG" % opt,
                 "-DCMAKE_CXX_FLAGS_RELEASE=%s -DNDEBUG" % opt,

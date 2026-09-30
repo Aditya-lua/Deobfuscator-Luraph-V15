@@ -3048,7 +3048,12 @@ class Program:
             sv = cap.get("self")
             if isinstance(sv, LTable):
                 self.dump.cap_by_self[sv.tid] = cap
-            st = cap.get(vm.maker["args"][0]["name"]) if isinstance(vm.maker, dict) else None
+            mk = cap.get("__maker")
+            vmk = None
+            if mk is not None:
+                t = mk.decode("latin-1") if isinstance(mk, bytes) else str(mk)
+                vmk = self.vms.get(t)
+            st = cap.get(vmk.maker["args"][0]["name"]) if vmk is not None and isinstance(vmk.maker, dict) else None
             if isinstance(st, LTable):
                 self.dump.cap_by_state[st.tid] = cap
 

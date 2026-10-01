@@ -67,11 +67,38 @@ function detectLuarmor(source) {
   return 0.0;
 }
 
+// Luraph v14.x: a different VM layout (repeat dispatchers, argument-0
+// prototypes, initializer factories) handled by the luraph_v14 engine.
+// v14.7-v14.9 are the supported builds; older v14.x routes here too (best
+// effort, lower confidence). Headerless v14 shapes never start with v15's
+// `return setmetatable({`, so they cannot steal v15 inputs.
+function detectLuraph14(source) {
+  const head500 = source.slice(0, 500);
+  const m = LURAPH_HEADER.exec(head500);
+  if (!m) {
+    const head4k = source.slice(0, 4096);
+    if (head4k.startsWith('return(function()') && /loadstring/.test(head4k)) return 0.8;
+    if (head4k.startsWith('return({') && /bit32|loadstring/.test(source.slice(0, 100000))) return 0.8;
+    if (head4k.startsWith('local init = (function(...') && source.includes('return({')) return 0.4;
+    return 0.0;
+  }
+  if (m[1] === '14') {
+    if (m[2] === '7' || m[2] === '8' || m[2] === '9') return 1.0;
+    return 0.5;
+  }
+  return 0.0;
+}
+
 const PLUGINS = [
   {
     name: 'luraph_v15',
     label: 'Luraph v15',
     detect: detectLuraph,
+  },
+  {
+    name: 'luraph_v14',
+    label: 'Luraph v14.x',
+    detect: detectLuraph14,
   },
   {
     name: 'luarmor_client',

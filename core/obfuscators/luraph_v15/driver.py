@@ -61,14 +61,18 @@ def patch_entries(source, path):
         lines[l] = lines[l][:c] + code + lines[l][c:]
     return "\n".join(lines)
 
-def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None):
+def devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths=(), live=None, devirt=None):
     """Lift the captured protos; constants that only Luraph's lazy decoder can
     produce (code that never ran) are requested from further runs. With a
     live harness (`live()` -> fetch function, while the long-lived harness
     made the current dump) the walks ask for them right away (a chain of
     constants, each needed to find the next, then takes one round instead
-    of one round per link)."""
-    from obfuscators.luraph_v15 import devirt
+    of one round per link).
+
+    `devirt` lets a sibling engine (luraph_v14) reuse these rounds with its
+    own lifter module; None means the v15 lifter."""
+    if devirt is None:
+        from obfuscators.luraph_v15 import devirt
     args = job.args
     requested = set()
     last_bufs = ""
@@ -289,10 +293,11 @@ def run(job):
             write_trace()
     return job.trace_path
 
-def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths):
+def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths, devirt_module=None):
     """devirtualize() with its constant rounds answered by one long-lived
     harness (started now, so the script runs while round 1 walks); a fresh
-    run per round if it fails or behaves differently."""
+    run per round if it fails or behaves differently. `devirt_module`: see
+    devirtualize()."""
     args = job.args
     bridge = runner.bridge
     server = [None]
@@ -345,7 +350,7 @@ def lift(job, runner, patched, cfg, chunks, run_text, ppath, dpath, chunk_paths)
             server[0] = None
         return runner.run(patched, c, chunks)
     try:
-        devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths, live)
+        devirtualize(job, ppath, dpath, cfg, rerun, chunk_paths, live, devirt_module)
     except Exception as e:
 
         print("[!] devirtualization failed: %s: %s" % (type(e).__name__, e), file=sys.stderr)

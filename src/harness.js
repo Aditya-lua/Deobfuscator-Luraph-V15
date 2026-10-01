@@ -233,7 +233,9 @@ async function runOnce(luau, source, cfg, hpath, timeoutSec, keepHarness, chunks
   const harness = buildHarness(source, cfg, chunks);
   fs.writeFileSync(hpath, harness, 'latin1');
 
-  const { body, err, code, signal } = await _communicate([luau, hpath], timeoutSec * 1000, STALL * 1000);
+  // cfg.stall: per-run stall override (the v14 chunk pass decodes silently
+  // for a while before its loadstring); unset -> the protocol default
+  const { body, err, code, signal } = await _communicate([luau, hpath], timeoutSec * 1000, (cfg.stall || STALL) * 1000);
 
   if (!keepHarness && fs.existsSync(hpath)) {
     try { fs.unlinkSync(hpath); } catch {}
@@ -249,7 +251,10 @@ async function runOnce(luau, source, cfg, hpath, timeoutSec, keepHarness, chunks
     // plainly instead of throwing an empty Error.
     const diag = luauCrashDiagnostic(luau, code, signal, stdout.length + err.length);
     const tail = (stdout.slice(-3000) + '\n' + err.slice(-3000)).trim();
-    return { body: null, err: diag ? (tail ? diag + '\n' + tail : diag) : tail };
+    // partial: the raw stdout of a run that never reached its protocol
+    // block (killed / aborted early) -- the v14 driver recovers chunk dumps
+    // printed before the stop from it
+    return { body: null, err: diag ? (tail ? diag + '\n' + tail : diag) : tail, partial: stdout };
   }
   let result = m[1];
   for (const hp of [hpath, hpath.replace(/\\/g, '/')]) {

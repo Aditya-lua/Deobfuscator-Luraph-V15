@@ -16,7 +16,12 @@ if cmd == "pipeline":
         c = json.load(f)
 
     from obfuscators.base import Job
-    from obfuscators.luraph_v15 import driver
+    # v14.x payloads use the v14 engine (the v15 walk + v14 mapper/lifter
+    # quirks); everything else stays on the v15 path untouched
+    if "v14" in (c.get("obfuscator") or ""):
+        from obfuscators.luraph_v14 import driver
+    else:
+        from obfuscators.luraph_v15 import driver
     import harness
 
     class DummyArgs:

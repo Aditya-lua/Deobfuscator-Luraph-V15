@@ -6,8 +6,10 @@ const KEYWORDS = new Set([
 ]);
 
 function stripMarkers(text) {
-
-  return text.replace(/--@\S*\n?/g, '');
+  // statement markers are whole lines "--@<n> <call chain>" (envlog): drop
+  // the entire line. Matching only "--@\S*" stopped at the space before the
+  // chain and left " 137:13892,141:13914" residue in every behaviour trace.
+  return text.replace(/^[^\S\n]*--@\d+[^\n]*\n?/gm, '');
 }
 
 function stripPreamble(text) {

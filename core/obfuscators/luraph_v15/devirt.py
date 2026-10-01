@@ -733,12 +733,19 @@ class ProtoLifter:
                 if v is None or isinstance(v, (LTable, Builtin, OpaqueFn, Opaque,
                                                int, float, bytes, bool)):
                     env0.vars[key] = v
+        self._prepare_maker_env(env0, vm, proto)
         r = it.call_lua(LuaFunc(vm.maker, env0), Multi(vm.maker_args(vmobj, proto, upvals, cap)))
         self.making = False
         f = r.first() if isinstance(r, Multi) else r
         if not isinstance(f, LuaFunc) or f.node is not vm.vm:
             raise Unsupported("closure maker did not return the VM closure")
         self.maker_scope = f.env
+
+    def _prepare_maker_env(self, env, vm, proto):
+        """Hook for engine variants that must seed the maker's lexical scope
+        before it runs (luraph_v14: factories close over their installing
+        initializer's locals, rebuilt from the __venvN captures). v15: no-op."""
+        return env
 
     def initial_state(self):
         self.in_prologue = True

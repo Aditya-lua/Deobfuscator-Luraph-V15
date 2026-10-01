@@ -3,17 +3,29 @@
 const fs = require('fs');
 const path = require('path');
 const vmmap = require('./vmmap');
+const vmmap14 = require('./vmmap14');
 const harness = require('./harness');
 const trace = require('./traceout');
 const tidy = require('./tidy');
 
 const SPIN_CHECKS = 24;
 
-function patchChunk(src, tmpdir, chunkTag) {
+// Luraph v14.x (job.obfuscator = the plugin label "Luraph v14.x") runs the
+// v14 mapper and the v14-only stages below. Every v14 branch is gated on this,
+// so a v15 job takes exactly the v15 path (same mapper object, same steps).
+function isV14(job) {
+  return !!(job.obfuscator && job.obfuscator.includes('v14'));
+}
+
+function mapperFor(job) {
+  return isV14(job) ? vmmap14 : vmmap;
+}
+
+function patchChunk(job, src, tmpdir, chunkTag) {
   const p = path.join(tmpdir, `_chunk_${harness.chunkKey(src)}.luau`);
   fs.writeFileSync(p, src, 'latin1');
   try {
-    return vmmap.patchEntries(src, p, chunkTag);
+    return mapperFor(job).patchEntries(src, p, chunkTag);
   } catch (e) {
     process.stderr.write(`[!] could not instrument chunk (${e.message})\n`);
     return src;
@@ -27,16 +39,20 @@ async function run(job) {
   const devirtOn = !args.noDevirt;
   let source = job.source;
 
+  const v14 = isV14(job);
+  const mapper = mapperFor(job);
+  if (v14) process.env.DEOB_ENGINE = 'v14';
+
   let patched;
   try {
-    patched = args.noHooks ? source : vmmap.patchEntries(source, job.sourcePath, harness.chunkKey(source));
+    patched = args.noHooks ? source : mapper.patchEntries(source, job.sourcePath, harness.chunkKey(source));
   } catch (e) {
     process.stderr.write(`[!] AST parse failed: ${e.message}\n`);
     throw e;
   }
 
   let spin = true;
-  if (spin) patched = vmmap.patchSpin(patched);
+  if (spin) patched = mapper.patchSpin(patched);
 
   const cachePath = harness.loadP2dCache(job.input);
   const runner = new harness.Runner(job);
@@ -49,13 +65,23 @@ async function run(job) {
   let cfg = null;
 
   for (let attempt = 1; attempt <= args.maxRuns; attempt++) {
+    // v14 chunk pass: before any chunk is known a v14 payload VM runs
+    // uninstrumented and silently for minutes, so the first pass only waits
+    // for the loadstring'd chunk (envlog dumps it and aborts), then the
+    // instrumented chunk is rerun. The blob decode before loadstring is
+    // silent and roughly linear in the protected size: give it room.
+    const chunkPass = v14 && devirtOn && attempt === 1 && Object.keys(chunks).length === 0;
     cfg = {
-      time_budget: args.budget,
+      time_budget: chunkPass ? Math.min(args.budget, 60) : args.budget,
       dump_strings: args.strings,
       executor: args.executor,
       skip_protos: skip,
       devirt: devirtOn,
     };
+    if (chunkPass) {
+      cfg.chunks_only = true;
+      cfg.stall = Math.max(90, Math.min(900, Math.round(job.source.length / 3000)));
+    }
     if (args.inputText) cfg.input_text = args.inputText;
     if (args.preludeFile) cfg.prelude = require('fs').readFileSync(args.preludeFile, 'latin1');
     if (args.noFold) cfg.fold = false;
@@ -65,6 +91,26 @@ async function run(job) {
     process.stderr.write(`[*] tracing ${job.input} (run ${attempt})...\n`);
     const res = await runner.run(patched, cfg, chunks);
     body = res.body;
+
+    if (!body && v14 && res.partial) {
+      // a killed v14 pass still printed the loadstring'd chunk(s) before the
+      // stall: recover them from the partial output and rerun instrumented
+      const partial = res.partial.replace(/\r\n/g, '\n');
+      const { chunks: partialFound } = harness.takeChunks(harness.takeP2d(partial));
+      let recovered = 0;
+      for (const [key, src] of partialFound) {
+        if (!chunks[key]) {
+          rawChunks[key] = src;
+          chunks[key] = patchChunk(job, src, job.outdir, key);
+          if (spin) chunks[key] = mapper.patchSpin(chunks[key]);
+          recovered++;
+        }
+      }
+      if (recovered > 0) {
+        process.stderr.write(`[*] recovered ${recovered} VM chunk(s) from the interrupted run; instrumenting and re-running\n`);
+        continue;
+      }
+    }
 
     if (!body) {
       runner.finish();
@@ -79,8 +125,8 @@ async function run(job) {
     for (const [key, src] of found) {
       if (!chunks[key]) {
         rawChunks[key] = src;
-        chunks[key] = patchChunk(src, job.outdir, key);
-        if (spin) chunks[key] = vmmap.patchSpin(chunks[key]);
+        chunks[key] = patchChunk(job, src, job.outdir, key);
+        if (spin) chunks[key] = mapper.patchSpin(chunks[key]);
         added++;
       }
     }
@@ -112,8 +158,14 @@ async function run(job) {
   body = harness.p2dMiss(body, cachePath);
   body = body.replace(new RegExp(harness.mark('TRIGGER ') + '\\d+\\n?', 'g'), '');
 
-  const [protosJson, b1] = trace.takeLine(body, 'PROTOS');
+  const [protosJson0, b1] = trace.takeLine(body, 'PROTOS');
   body = b1;
+  let protosJson = protosJson0;
+  if (v14 && devirtOn && protosJson && !protosJson.startsWith('error:')) {
+    // v14's in-harness root_callee can be stale on large scripts: the
+    // weighted runtime call-chain vote picks the payload root instead
+    protosJson = applyRootHint(protosJson, body);
+  }
   const [force, b2] = trace.takeLine(body, 'FORCE');
   body = b2;
   if (force && devirtOn) process.stderr.write(`[*] constants decoded on request: ${force}\n`);
@@ -201,6 +253,42 @@ async function run(job) {
 
   if (devirtOn && fs.existsSync(dpath)) {
     const lifted = fs.readFileSync(dpath, 'utf8');
+    if (v14 && v14ScaffoldScore(lifted) >= 24) {
+      // the "lift" is still Luraph's VM/bootstrap scaffolding, not the
+      // payload: recover what the payload did from the behaviour trace
+      process.stderr.write('[!] rejected devirtualized output: still Luraph VM/bootstrap scaffolding\n');
+      if (!job.debug) { try { fs.unlinkSync(dpath); } catch {} }
+      const recover = (b) => payloadTraceSource(tidy.tidy(b, { preamble: false }));
+      let payload = recover(text);
+      if (!payload || v14ScaffoldScore(payload) >= 24) {
+        // the instrumented run can stop before the payload executes; a
+        // trace-only pass (which runs the script further) usually sees more
+        try {
+          const tr = new harness.Runner(job);
+          process.stderr.write('[*] re-tracing without devirtualization to reach the payload\n');
+          const rr = await tr.run(patched, Object.assign({}, cfg, { devirt: false }), chunks);
+          tr.finish();
+          if (rr.body) {
+            let rb = harness.takeP2d(rr.body);
+            rb = harness.p2dMiss(rb, cachePath);
+            const { body: cb } = harness.takeChunks(rb);
+            const [b4r] = trace.takeStrings(cb);
+            const alt = recover(trace.header(job.input) + b4r);
+            if (alt && v14ScaffoldScore(alt) < v14ScaffoldScore(payload || '')) payload = alt;
+          }
+        } catch (e) {
+          process.stderr.write(`[!] trace-only recovery pass failed: ${e.message}\n`);
+        }
+      }
+      if (payload) {
+        process.stderr.write('[+] payload-attributed recovery from trace (bootstrap lift rejected)\n');
+        const payPath = job.path('.payload.lua');
+        job.write(payPath, payload + '\n');
+        return payPath;
+      }
+      if (!fs.existsSync(job.tracePath)) writeTrace();
+      return job.tracePath;
+    }
     const nilCalls = (lifted.match(/\(nil\)\(/g) || []).length;
     const lines = lifted.split('\n').length;
     if (nilCalls < 50 || nilCalls * 100 < lines) {
@@ -251,6 +339,183 @@ async function runGeneric(job) {
   if (strings) job.write(job.path('.strings.txt'), strings);
   trace.statusLine(body);
   return job.tracePath;
+}
+
+// ---- Luraph v14.x-only stages (gated by isV14 in run()) ----
+
+function traceRootCandidates(body) {
+  // Rank likely payload-root pids from the envlog call-chain markers: favour
+  // an immediate child of the outermost frame that accounts for many
+  // statements in few invocations, and penalize children that return to an
+  // emitting parent (the fingerprint/probe shape).
+  const scores = {}, hits = {}, invs = {}, lastSeen = {}, lastChild = {};
+  let pos = 0;
+  for (const line of body.split('\n')) {
+    const m = /^\s*--@\d+\s*(.*)$/.exec(line);
+    if (!m) continue;
+    pos++;
+    const chain = [];
+    for (const part of m[1].split(',')) {
+      const q = /^(\d+):([^,\s]*)/.exec(part.trim());
+      if (q) chain.push([q[1], q[2]]);
+    }
+    if (chain.length >= 2) {
+      const parent = chain[0][0], child = chain[1][0];
+      let w = 5 + Math.min(3, chain.length - 2);
+      if (chain.length === 2) w += 1;
+      scores[child] = (scores[child] || 0) + w;
+      hits[child] = (hits[child] || 0) + 1;
+      (invs[child] = invs[child] || new Set()).add(chain[1][1]);
+      lastSeen[child] = pos;
+      lastChild[parent] = child;
+    } else if (chain.length === 1) {
+      const child = lastChild[chain[0][0]];
+      if (child !== undefined) {
+        scores[child] = (scores[child] || 0) - 18;
+        delete lastChild[chain[0][0]];
+      }
+    }
+  }
+  for (const pid of Object.keys(invs)) {
+    scores[pid] = (scores[pid] || 0) - Math.max(0, invs[pid].size - 2) * 5;
+  }
+  return Object.keys(scores).sort((a, b) =>
+    (scores[b] - scores[a]) || ((hits[b] || 0) - (hits[a] || 0)) ||
+    ((lastSeen[b] || 0) - (lastSeen[a] || 0)));
+}
+
+function applyRootHint(protosJson, body) {
+  // v14: override the in-harness root_callee with the weighted call-chain
+  // vote (traceRootCandidates); unknown pids / unparsable dumps pass through
+  const ranked = traceRootCandidates(body);
+  if (!ranked.length) return protosJson;
+  let data;
+  try { data = JSON.parse(protosJson); } catch { return protosJson; }
+  const known = ranked.filter(p => String(p) in (data.protos || {})).slice(0, 8);
+  if (!known.length) return protosJson;
+  const hint = Number(known[0]);
+  const old = data.root_callee;
+  data.root_candidates = known.map(Number);
+  data.root_callee = hint;
+  if (old !== hint) {
+    process.stderr.write(`[*] payload root proto #${hint} from weighted runtime call chain\n`);
+  }
+  return JSON.stringify(data);
+}
+
+function v14ScaffoldScore(text) {
+  // Density-based scaffold detector: every marker is scaled by the number of
+  // lines, so a large genuine payload lift with some unresolved helper stubs
+  // is kept, while a compact Luraph bootstrap dump is rejected.
+  if (!text) return 1e6;
+  const lines = Math.max(1, text.split('\n').length);
+  let score = 0;
+  const callerRegs = (text.match(/the caller's registers/g) || []).length;
+  const runtime = (text.match(/luraph_runtime/g) || []).length;
+  const handlers = (text.match(/handlers\[/g) || []).length;
+  const stateBranches = (text.match(/\b(?:if|elseif)\s+state\s*==/g) || []).length;
+  const denseTable = (text.match(/^\s*\[\d+\]\s*=/gm) || []).length;
+  const stubs = (text.match(/error\("Luraph runtime function/g) || []).length;
+  const traceJunk = (text.match(/^\s*--\s{2,}(?:Script:|.*harness\.luau)/gm) || []).length;
+  const guards = (text.match(/error\("devirt:/g) || []).length;
+  if (callerRegs * 50 > lines) score += 40 + Math.min(60, callerRegs);
+  if (runtime * 40 > lines) score += 40 + Math.min(60, runtime);
+  if (handlers * 40 > lines) score += 40 + Math.min(40, handlers * 2);
+  if (stateBranches * 40 > lines) score += 30;
+  if (denseTable * 8 > lines) score += 30;
+  if (text.includes('local ... = ...')) score += 40;
+  if (stubs * 20 > lines) score += 40 + Math.min(60, stubs * 5);
+  if (traceJunk * 10 > lines) score += 30 + Math.min(60, traceJunk * 2);
+  if (guards * 20 > lines) score += 30 + Math.min(50, guards * 5);
+  // context-less fragment: a script's root chunk has no upvalues, so a lift
+  // dominated by unnamed upvalues (upvN) and nil receivers ((nil).Url,
+  // v(nil)) is an inner helper closure picked as the root, not the payload.
+  // Calibrated on the v14 references: real lifts stay <= 0.12 per line
+  // (large v14.9 partial lifts included), fragments run 0.6+.
+  const frag = (text.match(/\bupv\d+(?:_\d+)?\b/g) || []).length +
+               (text.match(/\(nil\)[.:[(]|\bv\(nil\)/g) || []).length;
+  if (frag >= 2 && frag * 10 >= lines * 3) score += 40;
+  return score;
+}
+
+const V14_PROBE_OBJECT = 'ScreenGui|Frame|Path2D|Folder|ImageButton|TextLabel';
+const V14_PROBE_SIGNAL = 'Destroying|DescendantRemoving|DescendantAdded|ChildRemoved|ChildAdded|AncestryChanged|Changed';
+
+function stripV14ProbeSuite(code) {
+  // Remove Luraph v14's compact anti-analysis fingerprint: empty task
+  // callbacks, throwaway ScreenGui/Frame/Path2D/Folder trees, and immediate
+  // signal connect/disconnect pairs. Patterns stay narrow, so a light gate
+  // suffices to leave ordinary user code alone.
+  const lines = code.split('\n');
+  const emptyTask = /^task\.(?:spawn|delay)\(.*function\([^)]*\)$/;
+  const probeNew = new RegExp(`^local\\s+(\\w+)\\s*=\\s*Instance\\.new\\("(?:${V14_PROBE_OBJECT})"(?:,.*)?\\)$`);
+  const collapsed = new RegExp(`^local\\s+(\\w+)\\s*=\\s*(.+?)\\.(?:${V14_PROBE_SIGNAL}):Connect\\(function\\([^)]*\\)\\s*end\\)\\s*;?\\s*\\1:Disconnect\\(\\)$`);
+  const connectHead = new RegExp(`^local\\s+(\\w+)\\s*=\\s*(.+)\\.(?:${V14_PROBE_SIGNAL}):Connect\\(function\\([^)]*\\)$`);
+  const isNoise = (t) => /^(?:--@|-- \[envlog\]|--)/.test(t);
+  const skipNoise = (i) => { while (i < lines.length && isNoise(lines[i].trim())) i++; return i; };
+
+  let sig = 0;
+  for (let i = 0; i < lines.length && sig < 2; i++) {
+    const t = lines[i].trim();
+    if (emptyTask.test(t) || connectHead.test(t) || probeNew.test(t)) sig++;
+  }
+  if (sig < 2) return code;
+
+  const out = [];
+  const probeVars = new Set();
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (emptyTask.test(t)) {
+      const j = skipNoise(i + 1);
+      if (j < lines.length && lines[j].trim() === 'end)') { i = j + 1; continue; }
+    }
+    let m = probeNew.exec(t);
+    if (m) { probeVars.add(m[1]); i += 1; continue; }
+    if (collapsed.test(t)) { i += 1; continue; }
+    m = connectHead.exec(t);
+    if (m) {
+      const j = skipNoise(i + 1);
+      if (j < lines.length && lines[j].trim() === 'end)') {
+        const k = skipNoise(j + 1);
+        if (k < lines.length && lines[k].trim() === `${m[1]}:Disconnect()`) { i = k + 1; continue; }
+      }
+    }
+    const recv = /^(\w+)(?:\.|:)/.exec(t);
+    if (recv && probeVars.has(recv[1])) { i += 1; continue; }
+    out.push(lines[i]);
+    i += 1;
+  }
+
+  code = out.join('\n');
+  for (const decl of code.match(/^\s*local\s+(\w+)\s*=\s*game:GetService\("(?:HttpService|RunService)"\)\s*$/gm) || []) {
+    const nm = (/local\s+(\w+)/.exec(decl) || [])[1];
+    if (!nm) continue;
+    const declRe = new RegExp(`^\\s*local\\s+${nm}\\s*=\\s*game:GetService\\("(?:HttpService|RunService)"\\)\\s*$`, 'gm');
+    const rest = code.replace(declRe, '');
+    if (!new RegExp(`\\b${nm}\\b`).test(rest)) code = rest;
+  }
+  return code.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function payloadTraceSource(body) {
+  // Last-resort payload recovery: drop the statement markers, the internal
+  // (NUL-prefixed) lines and the Luraph v14 probe suite. Statements the runtime
+  // never marked -- a trailing `print`, for instance -- are kept this way.
+  if (!body) return null;
+  const body2 = body.split('\n')
+    .filter((l) => !/^\s*--@\d+/.test(l))
+    .filter((l) => !l.startsWith('\x00'))
+    .filter((l) => !/^\s*-- \[envlog\]/.test(l))
+    .join('\n');
+  const code = stripV14ProbeSuite(body2);
+  if (!code) return null;
+  const kept = code.split('\n').filter((l) => {
+    const t = l.trim();
+    return t && !t.startsWith('--');
+  });
+  if (!kept.length) return null;
+  return kept.join('\n').trim();
 }
 
 module.exports = { run, runGeneric };

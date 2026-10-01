@@ -258,7 +258,20 @@ async function run(job) {
       // payload: recover what the payload did from the behaviour trace
       process.stderr.write('[!] rejected devirtualized output: still Luraph VM/bootstrap scaffolding\n');
       if (!job.debug) { try { fs.unlinkSync(dpath); } catch {} }
-      const recover = (b) => payloadTraceSource(tidy.tidy(b, { preamble: false }));
+      const recover = (b) => {
+        // the probe strip works line-wise on a trace: never emit a payload
+        // that does not parse when the unstripped trace does
+        const tb = tidy.tidy(b, { preamble: false });
+        const s = payloadTraceSource(tb, true);
+        if (s && !luauParses(job, s)) {
+          const raw = payloadTraceSource(tb, false);
+          if (raw && luauParses(job, raw)) {
+            process.stderr.write('[!] probe-stripped payload did not parse; keeping the unstripped trace\n');
+            return raw;
+          }
+        }
+        return s;
+      };
       let payload = recover(text);
       if (!payload || v14ScaffoldScore(payload) >= 24) {
         // the instrumented run can stop before the payload executes; a
@@ -467,6 +480,36 @@ function stripV14ProbeSuite(code) {
   }
   if (sig < 2) return code;
 
+  // Game-attached Instance.new trees are the script's real UI, not probes:
+  // keep them whole. A probe is a THROWAWAY tree, never parented to a live
+  // game object. Follow .Parent (and the 2nd Instance.new arg) up from each
+  // instance var; a chain ending at a non-Instance.new token (a service /
+  // game object) -- and not nil -- is attached. This is the only change from
+  // the reference stripper: it stops it from deleting a CoreGui-parented UI
+  // (and the handler attached to it), which left unbalanced, unparseable code.
+  const newAny = /^local\s+(\w+)\s*=\s*Instance\.new\("(\w+)"\s*(?:,\s*([\w.]+))?\)/;
+  const parentAssign = /^(\w+)\.Parent\s*=\s*([\w.]+)/;
+  const instCls = {}, parentTok = {};
+  for (const l of lines) {
+    const t = l.trim();
+    let mm = newAny.exec(t);
+    if (mm) { instCls[mm[1]] = mm[2]; if (mm[3]) parentTok[mm[1]] = mm[3]; continue; }
+    mm = parentAssign.exec(t);
+    if (mm && mm[1] in instCls) parentTok[mm[1]] = mm[2];
+  }
+  const attached = (v) => {
+    const seen = new Set();
+    for (;;) {
+      const p = parentTok[v];
+      if (p === undefined || p === 'nil') return false;
+      if (!(p in instCls)) return true;
+      if (seen.has(v)) return false;
+      seen.add(v); v = p;
+    }
+  };
+  const liveVars = new Set();
+  for (const v of Object.keys(instCls)) if (attached(v)) liveVars.add(v);
+
   const out = [];
   const probeVars = new Set();
   let i = 0;
@@ -477,7 +520,10 @@ function stripV14ProbeSuite(code) {
       if (j < lines.length && lines[j].trim() === 'end)') { i = j + 1; continue; }
     }
     let m = probeNew.exec(t);
-    if (m) { probeVars.add(m[1]); i += 1; continue; }
+    if (m) {
+      if (liveVars.has(m[1])) { out.push(lines[i]); i += 1; continue; }  // real game UI
+      probeVars.add(m[1]); i += 1; continue;
+    }
     if (collapsed.test(t)) { i += 1; continue; }
     m = connectHead.exec(t);
     if (m) {
@@ -504,17 +550,31 @@ function stripV14ProbeSuite(code) {
   return code.replace(/\n{3,}/g, '\n\n').trim();
 }
 
-function payloadTraceSource(body) {
+function luauParses(job, text) {
+  // syntax check with luau-ast (vmmap.loadAst throws SyntaxError on errors)
+  const p = path.join(job.outdir || require('os').tmpdir(), `_parsecheck_${process.pid}.luau`);
+  try {
+    fs.writeFileSync(p, text, 'utf8');
+    vmmap.loadAst(p);
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    try { fs.unlinkSync(p); } catch {}
+  }
+}
+
+function payloadTraceSource(body, strip = true) {
   // Last-resort payload recovery: drop the statement markers, the internal
-  // (NUL-prefixed) lines and the Luraph v14 probe suite. Statements the runtime
-  // never marked -- a trailing `print`, for instance -- are kept this way.
+  // (NUL-prefixed) lines and (strip) the Luraph v14 probe suite. Statements the
+  // runtime never marked -- a trailing `print`, for instance -- are kept this way.
   if (!body) return null;
   const body2 = body.split('\n')
     .filter((l) => !/^\s*--@\d+/.test(l))
     .filter((l) => !l.startsWith('\x00'))
     .filter((l) => !/^\s*-- \[envlog\]/.test(l))
     .join('\n');
-  const code = stripV14ProbeSuite(body2);
+  const code = strip ? stripV14ProbeSuite(body2) : body2;
   if (!code) return null;
   const kept = code.split('\n').filter((l) => {
     const t = l.trim();

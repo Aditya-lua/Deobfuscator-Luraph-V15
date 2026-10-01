@@ -290,12 +290,6 @@ def convert_stmts(stmts, D):
             out.append(ForPrepS(st.exprs))
         elif isinstance(st, D.Assign):
             v = st.value
-            if not hasattr(st.target, "__class__") or isinstance(st.target, (int, float, bool)) \
-                    or (isinstance(st.target, D.Const) and not isinstance(st.target.v, bytes)):
-                # a numeric-for recognition side effect writes the raw counter
-                # value (no register behind it): not expressible as Luau
-                out.append(CommentS("dropped write to raw counter slot %r" % (getattr(st.target, "v", st.target),)))
-                continue
             if isinstance(v, SymList) and not isinstance(st.target, Reg):
 
                 v = NewTableE([(None, conv(x, D)) for x in v.items], conv_tail(v.tail))
@@ -1677,11 +1671,6 @@ class Renderer:
     def lvalue(self, t):
         if isinstance(t, Index):
             return self.expr(t)
-        if isinstance(t, Const) and not isinstance(t.v, (bytes, str)) or isinstance(t, (int, float, bool)) \
-                and not isinstance(t, Const):
-            # a numeric-for recognition side effect writes a raw counter value:
-            # render as a (valid) global-ish name so the output stays parseable
-            return "__SLOT_%s__" % (t.v if isinstance(t, Const) else t)
         return self.expr(t)
 
     def if_stmt(self, st, ind):

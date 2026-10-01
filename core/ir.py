@@ -1,4 +1,3 @@
-import sys
 import luasym as S
 from luasym import (LTable, Expr, Const, Reg, Pseudo, Global, Upval, Index, Bin, Un, IfExp, TempVal,  
                     Vararg, ClosureExpr, Multi, TempTail, VarargTail, SymList, TailCount, RegFile, UpContainer)
@@ -77,15 +76,6 @@ class Missing(Expr):
         self.slot = slot
 
 def fmt_expr(e):
-    # sys.intern: state keys carry these strings by the million and nearly all
-    # repeat ("r3", "K5", "(BitAnd r7 255)" ...); interning dedupes them and
-    # keeps deep-proto walks from OOM-ing the container
-    out = _fmt_expr(e)
-    if type(out) is str:
-        return sys.intern(out)
-    return out
-
-def _fmt_expr(e):
     if e is None:
         return "nil"
     if isinstance(e, Const):

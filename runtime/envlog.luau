@@ -425,8 +425,7 @@ local function quote(s)
                 if c == '"' then return '\\"' end
                 if c == "\\" then return "\\\\" end
                 local b = R.byte(c)
-                -- escape EVERYTHING non-printable as decimal: binary blobs
-                -- (e.g. _bsdata0) must survive the UTF-8 stdout pipe losslessly
+                if b >= 128 then return c end -- keep UTF-8 as-is
                 return "\\" .. b
         end)
         return '"' .. out .. '"'
@@ -851,11 +850,6 @@ end
 
 -- a call whose result gets a local only if the result is used later
 local function callP(text, hint, tname, force)
-        if CFG.__superz_calls then
-                local n = #CFG.__superz_calls
-                CFG.__superz_calls[n + 1] = text
-                if n >= 400 then table.remove(CFG.__superz_calls, 1) end
-        end
         local p = newP({ kind = "call", tname = tname or "Instance", hint = hint })
         local st = emit({ call = text, res = p })
         INFO[p].stmt = st
@@ -1748,112 +1742,30 @@ local function onCall(p, ...)
         -- values { status = 200, body = "...", headers = {} } (headers optional).
         -- A key ending in '*' matches any url with that prefix (requests whose
         -- query carries a per-run nonce can still be answered)
-        -- the urls.__lrm_plant list serves here too (HttpGet-based protocol
-        -- rounds): full-URL prefix matched, any host, tamper-proof. After a
-        -- live-fetch suspension the loop re-scans, so plant hits supersede.
-        if R.type(a1) == "string"
+        if CFG.http_map and R.type(a1) == "string"
                 and (name == "HttpGet" or name == "HttpGetAsync" or name == "GetAsync" or name == "RequestAsync") then
-                local liveTries = 0
-                while true do
-                        local list = urls.__lrm_plant
-                        if R.type(list) == "table" then
-                                local served
-                                for i = 1, #list do
-                                        local plant = list[i]
-                                        if R.type(plant) == "table" and R.type(plant.body) == "string" then
-                                                local u = plant.url
-                                                if u == nil or (R.type(u) == "string" and R.sub(a1, 1, #u) == u) then
-                                                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
-                                                        comment(calleeText .. " -> canned via urls[" .. i .. "] ("
-                                                                .. R.tostring(#plant.body) .. " bytes, .." .. R.sub(a1, -10) .. ")")
-                                                        served = true
-                                                        if name == "HttpGet" then return plant.body end
-                                                        return { Success = true, StatusCode = 200,
-                                                                Headers = plant.headers or {}, Body = plant.body }
-                                                end
+                local hit = CFG.http_map["GET " .. a1] or CFG.http_map[a1]
+                if hit == nil then
+                        for k, v in R.next, CFG.http_map do
+                                if R.type(k) == "string" and #k > 1 and R.sub(k, #k, #k) == "*" then
+                                        local pfx = R.sub(k, 1, #k - 1)
+                                        if R.sub(a1, 1, #pfx) == pfx or ("GET " .. a1):sub(1, #pfx) == pfx then
+                                                hit = v
+                                                break
                                         end
                                 end
-                                _ = served
-                        end
-                        if CFG.http_map then
-                                local hit = CFG.http_map["GET " .. a1] or CFG.http_map[a1]
-                                if hit == nil then
-                                        for k, v in R.next, CFG.http_map do
-                                                if R.type(k) == "string" and #k > 1 and R.sub(k, #k, #k) == "*" then
-                                                        local pfx = R.sub(k, 1, #k - 1)
-                                                        if R.sub(a1, 1, #pfx) == pfx or ("GET " .. a1):sub(1, #pfx) == pfx then
-                                                                hit = v
-                                                                break
-                                                        end
-                                                end
-                                        end
-                                end
-                                if hit then
-                                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
-                                        comment(calleeText .. " -> canned " .. R.tostring(hit.status or 200)
-                                                .. " (" .. R.tostring(#R.tostring(hit.body or "")) .. " bytes)")
-                                        if name == "HttpGet" then return hit.body end
-                                        return { Success = true, StatusCode = hit.status or 200,
-                                                Headers = hit.headers or {}, Body = hit.body }
-                                end
-                        end
-                        -- live-fetch suspension for Luarmor endpoints: suspend
-                        -- the run, the serve driver fetches + plants, resume
-                        -- re-scans the plant list above
-                        if R.find(a1, "luarmor", 1, true)
-                                and CFG.serve and SERVE_PAD and coroutine.isyieldable()
-                                and liveTries < 4 then
-                                liveTries += 1
-                                R.print(MARK .. "NEEDFETCH " .. a1)
-                                R.print(SERVE_PAD)
-                                coroutine.yield("__LRMRES " .. a1)
-                        else
-                                break
                         end
                 end
-        end
-                -- [SUPERZ] real GUID for HttpService (envlog default answers a proxy)
-        if name == "GenerateGUID" and isMethod then
-                emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ") -- [SUPERZ] real" })
-                local v1, v2, v3 = math.random(0, 2147483647), math.random(0, 2147483647), math.random(0, 2147483647)
-                return string.format("%08x-%04x-4%03x-%04x-%04x%08x",
-                        v1 % 4294967296,
-                        v1 % 65536,
-                        v2 % 4096,
-                        (v3 % 16384) + 0x8000,
-                        v2 % 65536, v3 % 4294967296)
-        end
-        -- [SUPERZ] real JSON for HttpService (envlog default answers a proxy)
-        if (name == "JSONEncode" or name == "JSONDecode") and isMethod then
-                local j = CFG.__superz_json
-                local ok, out
-                if name == "JSONEncode" then
-                        ok, out = R.pcall(j.encode, args[1])
-                else
-                        ok, out = R.pcall(j.decode, a1 or args[1])
-                end
-                if ok then
-                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ") -- [SUPERZ] real" })
-                        return out
-                end
-        end
-        -- [SUPERZ] RbxAnalyticsService:GetClientId() -> stable device GUID
-        if name == "GetClientId" and isMethod then
-                emit({ text = calleeText .. "()" })
-                return "6c1f8a20-4e2b-4c9d-9f3a-71b2d5e0a4c7"
-        end
-        -- [SUPERZ] canned HttpGet responses (FlowAuth payload fetch)
-        if (name == "HttpGet" or name == "HttpGetAsync" or name == "GetAsync") and R.type(a1) == "string" then
-                remember(urls, a1)
-                local szcanned = CFG.__superz_canned
-                local hit = szcanned and (szcanned["GET " .. a1] or szcanned[a1])
                 if hit then
-                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ") -- [SUPERZ] canned" })
-                        return hit.body
+                        emit({ text = calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")" })
+                        comment(calleeText .. " -> canned " .. R.tostring(hit.status or 200)
+                                .. " (" .. R.tostring(#R.tostring(hit.body or "")) .. " bytes)")
+                        if name == "HttpGet" then return hit.body end
+                        return { Success = true, StatusCode = hit.status or 200,
+                                Headers = hit.headers or {}, Body = hit.body }
                 end
         end
-
-if name == "HttpGet" or name == "HttpGetAsync" or name == "HttpPost" or name == "HttpPostAsync"
+        if name == "HttpGet" or name == "HttpGetAsync" or name == "HttpPost" or name == "HttpPostAsync"
                 or name == "GetAsync" or name == "PostAsync" or name == "RequestAsync" then
                 if R.type(a1) == "string" then remember(urls, a1) end
                 return callP(calleeText .. "(" .. fmtArgs(R.unpack(args, 1, args.n)) .. ")", "response", "string")
@@ -2107,12 +2019,6 @@ function methodFn(p, k)
         f = function(...)
                 local self = ...
                 if not isP(self) then
-                        -- the recovered Luarmor fingerprint copy probes the
-                        -- RunService flags with '.' (rs.IsStudio()); the flag
-                        -- table is the whole answer, so tolerate no self there
-                        if RUNSERVICE_BOOL[k] ~= nil then
-                                return RUNSERVICE_BOOL[k]
-                        end
                         R.error("Expected ':' not '.' calling member function " .. k, 0)
                 end
                 return PMT.__call(indexP(self, k), ...)
@@ -2130,10 +2036,6 @@ local SIGNAL_MEMBERS = {
 }
 PMT.__index = function(p, k)
         local info = INFO[p]
-        if k == "CreatorType" then return CFG.__superz_creator_type or "User" end
-        if k == "GameId" then return CFG.__superz_game_id or 0 end
-        if k == "PlaceId" then return CFG.__superz_place_id or 0 end
-        if k == "CreatorId" then return CFG.__superz_creator_id or 0 end
         if CFG.trace or CFG.ptrace then R.print("[index]", info.name or info.hint, k) end
         if k == "Parent" and (info.nilParent or info.created) then return info.props.Parent end
         -- unknown objects: a Parent chain ends at workspace -> game -> nil after a
@@ -2273,28 +2175,6 @@ end
 PMT.__concat = function(a, b)
         if opaqueType(a) or opaqueType(b) then
                 R.error(R.fmt("attempt to concatenate %s with %s", luaTypeName(a), luaTypeName(b)), 2)
-        end
-        local function __sz_rval(x)
-                local t = type(x)
-                if (t == "table" or t == "userdata") and REALV[x] ~= nil then return REALV[x] end
-                return x
-        end
-        local __ra, __rb = __sz_rval(a), __sz_rval(b)
-        local __ta, __tb = R.type(__ra), R.type(__rb)
-        if (__ta == "string" or __ta == "number") and (__tb == "string" or __tb == "number") then
-                return __ra .. __rb
-        end
-        if CFG.__superz_logglobal then
-                local function __sz_desc(x)
-                        local rv = "-"
-                        local xt = type(x)
-                        if (xt == "table" or xt == "userdata") and REALV[x] ~= nil then rv = R.tostring(REALV[x]):sub(1, 40) end
-                        local inf = ((xt == "table" or xt == "userdata") and INFO[x]) or nil
-                        local kind = inf and R.tostring(inf.kind) or "?"
-                        local txt = inf and R.tostring(inf.text or inf.name or inf.hint or "?"):sub(1, 60) or R.tostring(x):sub(1, 40)
-                        return xt .. "/" .. kind .. "/" .. txt .. "/realv=" .. rv
-                end
-                R.print("\1SUPERZCONCATOP\1" .. __sz_desc(a) .. " || " .. __sz_desc(b))
         end
         return exprP(fmt(a) .. " .. " .. fmt(b), "string")
 end
@@ -2663,13 +2543,6 @@ E.tostring = function(...)
                 if REALV[v] ~= nil then return R.tostring(REALV[v]) end
                 -- tostring(instance) is its Name
                 if R.type(info.props.Name) == "string" and (info.className or opaqueType(v) == "Instance") then return info.props.Name end
-                if CFG.__superz_logglobal then
-                        local iks = {}
-                        for ik2, iv2 in pairs(info) do
-                                iks[#iks + 1] = tostring(ik2) .. "=" .. tostring(iv2):sub(1, 70)
-                        end
-                        R.print("\1SUPERZTOSTRING\1" .. table.concat(iks, " | "))
-                end
                 return exprP("tostring(" .. tok(v) .. ")", "string")
         end
         return R.tostring(...)
@@ -2755,11 +2628,7 @@ E.loadstring = function(src, chunkname)
                 -- spin watchdog (see E.__SPIN): a chunk the driver never saw (the run
                 -- that would report it hung) gets its dispatch heads patched here
                 if CFG.spin and not (patched and R.find(patched, "__SPIN.n", 1, true)) then
-                        -- [SUPERZ] two dispatch-head shapes: while-form and
-                        -- repeat-form (Luraph v15 builds differ)
                         patched = R.gsub(patched or src, "while true do [%w_, ]-=[%a_][%w_]*%[[%a_][%w_]*%];",
-                                "%0__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;")
-                        patched = R.gsub(patched, "repeat local [%a_][%w_]*=%([%a_][%w_]*%[[%a_][%w_]*%]%);",
                                 "%0__SPIN.n=__SPIN.n+1;if __SPIN.n>=__SPIN.step then __SPIN.f()end;")
                 end
         end
@@ -2958,538 +2827,6 @@ do
 end
 E._G = genvTable("_G")
 E.shared = genvTable("shared")
-
--- [SUPERZ] FlowAuth support: verified SHA-256 + base64 + _bsdata0 handoff preseed
-do
-        local sha256fn = (function()
--- SHA-256 in pure Luau (bit32), returns lowercase hex digest.
--- Standalone test mode: compares against known vectors when run directly.
-
-local function sha256(msg)
-    local band, bxor, bnot, rrotate, rshift =
-        bit32.band, bit32.bxor, bit32.bnot, bit32.rrotate, bit32.rshift
-    local K = {
-        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
-    }
-    local H = {
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    }
-    local len = #msg
-    local bits = len * 8
-    local hi = math.floor(bits / 4294967296)
-    local lo = bits - hi * 4294967296
-    local withone = len + 1
-    local zeros = (55 - len) % 64
-    local total = withone + zeros + 8
-    local w = table.create and table.create(64) or {}
-
-    local function getbyte(i)
-        if i <= len then return string.byte(msg, i) end
-        if i == withone then return 0x80 end
-        if i <= total - 8 then return 0 end
-        local j = i - (total - 8) -- 1..8, big-endian 64-bit bit length
-        if j <= 4 then
-            return band(math.floor(hi / 256 ^ (4 - j)) % 256, 0xFF)
-        end
-        return band(math.floor(lo / 256 ^ (8 - j)) % 256, 0xFF)
-    end
-
-    for base = 0, total - 1, 64 do
-        for j = 0, 15 do
-            local o = base + j * 4
-            w[j + 1] = getbyte(o + 1) * 16777216 + getbyte(o + 2) * 65536
-                + getbyte(o + 3) * 256 + getbyte(o + 4)
-        end
-        for j = 17, 64 do
-            local a, b = w[j - 15], w[j - 2]
-            local s0 = bxor(rrotate(a, 7), rrotate(a, 18), rshift(a, 3))
-            local s1 = bxor(rrotate(b, 17), rrotate(b, 19), rshift(b, 10))
-            w[j] = (w[j - 16] + s0 + w[j - 7] + s1) % 4294967296
-        end
-        local a, b, c, d, e, f, g, h =
-            H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]
-        for j = 1, 64 do
-            local S1 = bxor(rrotate(e, 6), rrotate(e, 11), rrotate(e, 25))
-            local ch = bxor(band(e, f), band(bnot(e), g))
-            local t1 = (h + S1 + ch + K[j] + w[j]) % 4294967296
-            local S0 = bxor(rrotate(a, 2), rrotate(a, 13), rrotate(a, 22))
-            local maj = bxor(band(a, b), band(a, c), band(b, c))
-            local t2 = (S0 + maj) % 4294967296
-            h, g, f = g, f, e
-            e = (d + t1) % 4294967296
-            d, c, b = c, b, a
-            a = (t1 + t2) % 4294967296
-        end
-        H[1] = (H[1] + a) % 4294967296
-        H[2] = (H[2] + b) % 4294967296
-        H[3] = (H[3] + c) % 4294967296
-        H[4] = (H[4] + d) % 4294967296
-        H[5] = (H[5] + e) % 4294967296
-        H[6] = (H[6] + f) % 4294967296
-        H[7] = (H[7] + g) % 4294967296
-        H[8] = (H[8] + h) % 4294967296
-    end
-
-    return string.format("%08x%08x%08x%08x%08x%08x%08x%08x",
-        H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8])
-end
-
-return sha256
-        end)()
-        local b64decode, b64encode = (function()
--- Base64 decode/encode in pure Luau. Returns string (bytes) or nil on error.
-local ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-
-local function b64decode(data)
-    if type(data) == "buffer" then data = buffer.tostring(data) end
-    data = tostring(data)
-    local len = #data
-    -- strip padding / whitespace tolerance
-    local out = {}
-    local n = 0
-    local acc = 0
-    local accbits = 0
-    for i = 1, len do
-        local c = string.sub(data, i, i)
-        local v
-        if c == "=" then
-            break
-        else
-            local p = string.find(ALPHABET, c, 1, true)
-            if not p then
-                -- skip whitespace (CRLF etc.)
-                if c == "\r" or c == "\n" or c == " " or c == "\t" then
-                    -- ignore
-                else
-                    return nil, "invalid base64 character: " .. string.byte(c)
-                end
-            else
-                v = p - 1
-                acc = acc * 64 + v
-                accbits = accbits + 6
-                if accbits >= 8 then
-                    accbits = accbits - 8
-                    local byte = math.floor(acc / 2 ^ accbits) % 256
-                    acc = acc % (2 ^ accbits)
-                    n = n + 1
-                    out[n] = string.char(byte)
-                end
-            end
-        end
-    end
-    return table.concat(out)
-end
-
-local function b64encode(data)
-    if type(data) == "buffer" then data = buffer.tostring(data) end
-    data = tostring(data)
-    local out = {}
-    local n = 0
-    local len = #data
-    for i = 1, len - len % 3, 3 do
-        local a, b, c = string.byte(data, i, i + 2)
-        local acc = a * 65536 + b * 256 + c
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 262144) % 64 + 1, math.floor(acc / 262144) % 64 + 1)
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 4096) % 64 + 1, math.floor(acc / 4096) % 64 + 1)
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 64) % 64 + 1, math.floor(acc / 64) % 64 + 1)
-        n = n + 1; out[n] = string.sub(ALPHABET, acc % 64 + 1, acc % 64 + 1)
-    end
-    local rem = len % 3
-    if rem == 1 then
-        local a = string.byte(data, len)
-        local acc = a * 65536
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 262144) % 64 + 1, math.floor(acc / 262144) % 64 + 1)
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 4096) % 64 + 1, math.floor(acc / 4096) % 64 + 1)
-        out[n + 1] = "=="
-    elseif rem == 2 then
-        local a, b = string.byte(data, len - 1, len)
-        local acc = a * 65536 + b * 256
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 262144) % 64 + 1, math.floor(acc / 262144) % 64 + 1)
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 4096) % 64 + 1, math.floor(acc / 4096) % 64 + 1)
-        n = n + 1; out[n] = string.sub(ALPHABET, math.floor(acc / 64) % 64 + 1, math.floor(acc / 64) % 64 + 1)
-        out[n + 1] = "="
-    end
-    return table.concat(out)
-end
-
-return b64decode, b64encode
-        end)()
-        local jsonEncode, jsonDecode = (function()
--- JSON encode/decode in pure Luau (Roblox HttpService-style).
-local JSONESC = {['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t', ['\b'] = '\\b', ['\f'] = '\\f'}
-
-local function encodeString(s)
-    return '"' .. string.gsub(s, '[%c"\\]', function(c)
-        return JSONESC[c] or string.format("\\u%04x", string.byte(c))
-    end) .. '"'
-end
-
-local function encode(v, seen)
-    local t = type(v)
-    if v == nil then return "null" end
-    if t == "boolean" then return v and "true" or "false" end
-    if t == "number" then
-        if v ~= v or v == math.huge or v == -math.huge then return "null" end
-        if v == math.floor(v) and math.abs(v) < 2 ^ 53 then
-            return string.format("%d", v)
-        end
-        return tostring(v)
-    end
-    if t == "string" then return encodeString(v) end
-    if t == "table" then
-        if seen[v] then error("cannot encode recursive table", 2) end
-        seen[v] = true
-        -- array detection: keys 1..n all present
-        local n = 0
-        local isArr = true
-        for k in pairs(v) do
-            if type(k) ~= "number" or k % 1 ~= 0 or k < 1 then
-                isArr = false
-            else
-                n = n + 1
-            end
-        end
-        local parts = {}
-        if isArr and n > 0 then
-            for i = 1, n do
-                parts[i] = encode(v[i], seen)
-            end
-            seen[v] = nil
-            return "[" .. table.concat(parts, ",") .. "]"
-        end
-        -- object: sorted keys for deterministic output
-        local keys = {}
-        for k in pairs(v) do
-            if type(k) == "string" or type(k) == "number" then
-                keys[#keys + 1] = k
-            end
-        end
-        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-        for i, k in ipairs(keys) do
-            parts[i] = encodeString(tostring(k)) .. ":" .. encode(v[k], seen)
-        end
-        seen[v] = nil
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    error("cannot encode value of type " .. t, 2)
-end
-
-local function jsonEncode(v)
-    return encode(v, {})
-end
-
--- decoder ---------------------------------------------------------------
-local function decode(s, pos)
-    pos = pos or 1
-    local function skipWs(p)
-        while p <= #s do
-            local c = string.sub(s, p, p)
-            if c == " " or c == "\t" or c == "\n" or c == "\r" then p = p + 1 else break end
-        end
-        return p
-    end
-    local parseValue -- forward
-
-    local function parseString(p)
-        -- expects s:sub(p,p) == '"'
-        p = p + 1
-        local buf = {}
-        while p <= #s do
-            local c = string.sub(s, p, p)
-            if c == '"' then
-                return table.concat(buf), p + 1
-            elseif c == "\\" then
-                local e = string.sub(s, p + 1, p + 1)
-                if e == "u" then
-                    local hex = string.sub(s, p + 2, p + 5)
-                    local code = tonumber(hex, 16)
-                    p = p + 6
-                    if code < 0x80 then
-                        buf[#buf + 1] = string.char(code)
-                    elseif code < 0x800 then
-                        buf[#buf + 1] = string.char(0xC0 + math.floor(code / 64), 0x80 + code % 64)
-                    else
-                        buf[#buf + 1] = string.char(0xE0 + math.floor(code / 4096),
-                            0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
-                    end
-                else
-                    local map = { n = "\n", t = "\t", r = "\r", b = "\b", f = "\f", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
-                    buf[#buf + 1] = map[e] or e
-                    p = p + 2
-                end
-            else
-                buf[#buf + 1] = c
-                p = p + 1
-            end
-        end
-        error("unterminated string", 0)
-    end
-
-    parseValue = function(p)
-        p = skipWs(p)
-        local c = string.sub(s, p, p)
-        if c == '"' then
-            return parseString(p)
-        elseif c == "{" then
-            local obj = {}
-            p = skipWs(p + 1)
-            if string.sub(s, p, p) == "}" then return obj, p + 1 end
-            while true do
-                p = skipWs(p)
-                local k
-                k, p = parseString(p)
-                p = skipWs(p)
-                if string.sub(s, p, p) ~= ":" then error("expected :", 0) end
-                local v
-                v, p = parseValue(p + 1)
-                obj[k] = v
-                p = skipWs(p)
-                local d = string.sub(s, p, p)
-                if d == "," then p = p + 1
-                elseif d == "}" then return obj, p + 1
-                else error("expected , or }", 0) end
-            end
-        elseif c == "[" then
-            local arr = {}
-            p = skipWs(p + 1)
-            if string.sub(s, p, p) == "]" then return arr, p + 1 end
-            while true do
-                local v
-                v, p = parseValue(p)
-                arr[#arr + 1] = v
-                p = skipWs(p)
-                local d = string.sub(s, p, p)
-                if d == "," then p = p + 1
-                elseif d == "]" then return arr, p + 1
-                else error("expected , or ]", 0) end
-            end
-        elseif string.sub(s, p, p + 3) == "true" then
-            return true, p + 4
-        elseif string.sub(s, p, p + 4) == "false" then
-            return false, p + 5
-        elseif string.sub(s, p, p + 3) == "null" then
-            return nil, p + 4
-        else
-            local num = string.match(s, "^%-?%d+%.?%d*[eE]?%+?%-?%d*", p)
-            if not num or num == "" then
-                num = string.match(s, "^%-?%d+", p)
-            end
-            if num and num ~= "" then
-                return tonumber(num), p + #num
-            end
-            error("unexpected character at " .. p .. ": " .. string.sub(s, p, p + 10), 0)
-        end
-    end
-
-    return parseValue(pos)
-end
-
-local function jsonDecode(s)
-    if type(s) == "buffer" then s = buffer.tostring(s) end
-    return decode(tostring(s))
-end
-
-return jsonEncode, jsonDecode
-        end)()
-        CFG.__superz_json = { encode = jsonEncode, decode = jsonDecode }
-        CFG.__superz_logglobal = true
-        CFG.__superz_calls = {}
-        -- game identity: EDIT these to the game FlowAuth should believe it runs in
-        CFG.__superz_game_id = 3317771874
-        CFG.__superz_place_id = 8737899170
-        CFG.__superz_creator_id = 745308
-        CFG.__superz_creator_type = "User"
-        local function tobytes(data)
-                if type(data) == "buffer" then return buffer.tostring(data) end
-                return tostring(data)
-        end
-        E.sha256 = sha256fn
-        E.hash = function(alg, data)
-                local a = string.lower(tostring(alg))
-                if a == "sha256" then return sha256fn(tobytes(data)) end
-                error("hash: algorithm '" .. tostring(alg) .. "' not available in sandbox", 2)
-        end
-        E.digest = E.hash
-        E.crypto = { sha256 = sha256fn, hash = E.hash, digest = E.hash }
-        E.crypt = { sha256 = sha256fn, hash = E.hash,
-                base64decode = b64decode, base64_decode = b64decode,
-                base64encode = b64encode, base64_encode = b64encode }
-        E.base64 = { decode = b64decode, encode = b64encode,
-                Decode = b64decode, Encode = b64encode }
-        E.base64decode = b64decode
-        E.base64_decode = b64decode
-        E.base64encode = b64encode
-        -- stable device identifier fallbacks (FlowAuth probes these)
-        E.gethwid = function() return "AF21C3E5B6D74E0982F1C0A5D3B7E912" end
-        E.get_hwid = E.gethwid
-        -- canned HTTP responses (captured live from flowauth.net)
-        local canned = {}
-        CFG.__superz_canned = canned
-
-        local function fakeRequest(opts)
-                -- [SUPERZ] unwrap property proxies (REALV-backed) before use
-                if (type(opts) == "table" or type(opts) == "userdata") and REALV[opts] ~= nil then
-                        opts = REALV[opts]
-                end
-                local url, body, method = "", "", "GET"
-                if type(opts) == "table" then
-                        local uv = opts.Url or opts.url
-                        if (type(uv) == "table" or type(uv) == "userdata") and REALV[uv] ~= nil then uv = REALV[uv] end
-                        url = tostring(uv or "")
-                        method = tostring(opts.Method or opts.method or "GET")
-                        local bv = opts.Body or opts.body
-                        if (type(bv) == "table" or type(bv) == "userdata") and REALV[bv] ~= nil then bv = REALV[bv] end
-                        body = tobytes(bv or "")
-                else
-                        url = tostring(opts)
-                end
-                if not R.find(url, "^https?://") then
-                        -- [SUPERZ] diagnostics: dump the proxy info so the
-                        -- driver can show WHAT the runtime passed as opts
-                        local desc = "opts=" .. type(opts)
-                        if isP(opts) and INFO[opts] then
-                                for ik, iv in R.next, INFO[opts] do
-                                        desc = desc .. " " .. tostring(ik) .. "=" .. tostring(iv):sub(1, 60)
-                                end
-                        end
-                        if type(opts) == "table" then
-                                local uv2 = opts.Url or opts.url
-                                desc = desc .. " Url=" .. type(uv2)
-                                if isP(uv2) and INFO[uv2] then
-                                        for ik2, iv2 in R.next, INFO[uv2] do
-                                                desc = desc .. " " .. tostring(ik2) .. "=" .. tostring(iv2):sub(1, 60)
-                                        end
-                                end
-                        end
-                        print("\1SUPERZREQOPTS\1" .. b64encode(desc))
-                end
-                local hit = canned[method .. " " .. url] or canned[url]
-                if hit then
-                        return { Success = true, StatusCode = hit.status or 200,
-                                Headers = hit.headers or {}, Body = hit.body }
-                end
-                -- [SUPERZ] in-run plant list (serve driver live responses),
-                -- full-URL prefix matched, any host; reqbody (when present)
-                -- additionally pins the entry to one REQUEST body -- the
-                -- FlowAuth payload endpoint reuses one URL for chunk 1/2,
-                -- only the token in the body differs (same-URL replay of
-                -- chunk 1 broke the payload integrity check, observed).
-                local list = urls.__lrm_plant
-                if R.type(list) == "table" then
-                        for i = 1, #list do
-                                local plant = list[i]
-                                if R.type(plant) == "table" and R.type(plant.body) == "string" then
-                                        local u = plant.url
-                                        local umatch = u == nil
-                                                or (R.type(u) == "string" and R.sub(url, 1, #u) == u)
-                                        local rb = plant.reqbody
-                                        local rbmatch = rb == nil
-                                                or (R.type(rb) == "string" and rb == body)
-                                        if umatch and rbmatch then
-                                                return { Success = true, StatusCode = plant.status or 200,
-                                                        Headers = plant.headers or {}, Body = plant.body }
-                                        end
-                                end
-                        end
-                end
-                -- leak the request into the trace (method|url|body, base64)
-                local leak = b64encode(method .. "|" .. url .. "|" .. body)
-                print("\1SUPERZREQ\1" .. leak)
-                -- [SUPERZ] in-run live fetch loop: suspend the whole run for
-                -- the serve driver (same process = same session nonce); the
-                -- driver plants the response and resumes this exact thread
-                if CFG.serve and SERVE_PAD and coroutine.isyieldable() then
-                        local tries = urls.__sz_tries or {}
-                        urls.__sz_tries = tries
-                        local nk = method .. " " .. url
-                        local n = (tries[nk] or 0) + 1
-                        tries[nk] = n
-                        if n <= 4 then
-                                print(SERVE_PAD)
-                                coroutine.yield("__LRMRES " .. url)
-                                -- resumed with the response planted: re-enter
-                                -- from the top (the plant scan hits now)
-                                return fakeRequest(opts)
-                        end
-                end
-                pcall(function() return E.game:HttpGet("https://superz.leak/" .. leak) end)
-                return { Success = false, StatusCode = 0, Headers = {}, Body = "" }
-        end
-        local function installRequest(t)
-                if type(t) ~= "table" then return end
-                t.request = fakeRequest
-                t.http_request = fakeRequest
-                t.httpRequest = fakeRequest
-                t.httprequest = fakeRequest
-                t.http = { request = fakeRequest }
-                t.syn = { request = fakeRequest }
-        end
-        installRequest(E)
-        installRequest(GENV)
-        installRequest(E._G)
-        installRequest(E.shared)
-        E.http = { request = fakeRequest }
-        E.syn = { request = fakeRequest }
-        -- ''' + MARK + ''' table.concat probe: find who passes userdata into concat
-        local realtable = table
-        local shimtable = setmetatable({}, { __index = realtable })
-        shimtable.concat = function(t, sep, i, j)
-                local lo, hi = (i or 1), (j or #t)
-                local bad = false
-                for k = lo, hi do
-                        local v = t[k]
-                        local vt = type(v)
-                        if vt ~= "string" and vt ~= "number" then bad = true end
-                end
-                if bad then
-                        local parts = {}
-                        for k = 1, math.min(#t, 40) do
-                                local v = t[k]
-                                local desc = k .. ":" .. type(v) .. "=" .. tostring(v):sub(1, 40)
-                                if isP(v) and INFO[v] then
-                                        local inf = INFO[v]
-                                        local ikeys = {}
-                                        for ik, iv in pairs(inf) do
-                                                ikeys[#ikeys + 1] = tostring(ik) .. "=" .. tostring(iv):sub(1, 80)
-                                        end
-                                        desc = desc .. " [INFO " .. table.concat(ikeys, ", ") .. "]"
-                                end
-                                parts[#parts + 1] = desc
-                        end
-                        local calllog = ""
-                        if CFG.__superz_calls then
-                                local cl = {}
-                                local cc = #CFG.__superz_calls
-                                for ci = math.max(1, cc - 12), cc do
-                                        cl[#cl + 1] = tostring(CFG.__superz_calls[ci]):sub(1, 60)
-                                end
-                                calllog = " ||CALLS " .. table.concat(cl, " ;; ")
-                        end
-                        local tb = debug and debug.traceback and debug.traceback("concat", 2) or ""
-                        print("\1SUPERZCONCAT\1" .. b64encode(table.concat(parts, " ~ ")
-                                .. calllog .. " ||TB " .. tostring(tb):sub(1, 120)))
-                end
-                return realtable.concat(t, sep, i, j)
-        end
-        E.table = shimtable
-        GENV.table = shimtable
-        if type(E._G) == "table" then E._G.table = shimtable end
-        if type(E.shared) == "table" then E.shared.table = shimtable end
-        -- FlowAuth loader publishes _bsdata0 = {blob, seedA, seedB} (normal variant)
-        local handoff = {"\054\223\125\123\205\007\117\054\089\155\184\041\149\025\237\060\164\225\235\214\239\003\209\181\047\244\131\140\109\086\193\073\014\248\037\181\134\241\106\156\213\090\014\219\121\211\154\000\040\061\168\228\075\057\049\096\183\012\063\218\074\050\076\025\146\061\194\186\176\186\069\119\223\202\250\079\143\131\083\134\020\204\240\179\236\005\200\105\226\148\199\246\032\166\142\144\181\039\063\060\006\179\158\048\148\101\050\016\072\230\093\188\212\065\097\254\119\022\027\255\114\007\201\023\032\011\137\039\103\249\021\162\152\053\080\156\219\004\141\020\204\078\233\246\138\040\093\237\093\105\017\019\252\169\066\160\018\147\219\071\196\060\214\231\207\006\143\163\249\221\093\065\197\209\246\059\027\161\247\253\224\042\030\064\178\172\232\110\040\206\006\175\108\023\171\157\077\064\126\169\088\173\245\086\193\101\045\071\127\189\027\105\234\117\040\050\164\072\029\240\246\052\154\243\241\166\184\010\017\091\023\029\146\183\031\118\062\251\098\225\005\020\009\034\060\124\050\147\183\051\188\192\001\217\171\239\248\106\178\229\223\247\235\089\164\042\154\172\099\043\123\060\121\173\129\251\148\164\068\043\203\223\214\222\129\118\196\145\186\166\137\032\235\209\235\122\106\048\008\142\069\114\090\199\227",3043952245,1838703699}
-        E._bsdata0 = handoff
-        GENV._bsdata0 = handoff
-        if type(E._G) == "table" then E._G._bsdata0 = handoff end
-        if type(E.shared) == "table" then E.shared._bsdata0 = handoff end
-end
 E.game = globalP("game")
 INFO[E.game].className = "DataModel"
 E.Game = E.game
@@ -4094,76 +3431,14 @@ local function httpRequest(label)
                 -- the sephal anti-tamper nils new CFG/http_map fields mid-run
                 -- but preserves CFG.readfile_map (shallow snapshot: shared
                 -- table reference) -- serve the session response from it
-                -- 0) the urls.__lrm_plant list: live-captured responses planted
-                -- by the serve driver, full-URL prefix matched, ANY host
-                -- (x.luarmor.net handshakes, cdn.luarmor.net client chunks).
-                -- `urls` on purpose: a module local (declared before every
-                -- handler) that the script env cannot reach; its string keys
-                -- never appear in the ipairs dump, and the sephal anti-tamper
-                -- snapshot only covers the script-visible env + CFG/CHAIN
-                -- fields. A dedicated top-level local would exceed the
-                -- 200-register compile limit (observed).
-                -- Each protocol round (handshake -> retry -> client fetch) is
-                -- a distinct entry keyed by its full URL.
-                if R.type(opts.Url) == "string" and R.type(urls.__lrm_plant) == "table" then
-                        local list = urls.__lrm_plant
-                        local matched = false
-                        for i = 1, #list do
-                                local plant = list[i]
-                                if R.type(plant) == "table" and R.type(plant.body) == "string" then
-                                        local u = plant.url
-                                        if u == nil or (R.type(u) == "string" and R.sub(opts.Url, 1, #u) == u) then
-                                                comment(label .. " -> canned via urls[" .. i .. "] ("
-                                                        .. R.tostring(#plant.body) .. " bytes, .." .. R.sub(opts.Url, -10) .. ")")
-                                                matched = true
-                                                return { Success = true, StatusCode = 200,
-                                                        Headers = plant.headers or {}, Body = plant.body }
-                                        end
-                                end
-                        end
-                        if not matched then
-                                -- diagnostics: the anti-tamper restores handler
-                                -- upvalues mid-run -- report what survived here
-                                local u0 = list[1]
-                                if R.type(u0) == "table" and R.type(u0.url) == "string" then
-                                        local w = u0.url
-                                        local diff
-                                        for i = 1, R.math.min(#w, #opts.Url) do
-                                                if R.byte(w, i) ~= R.byte(opts.Url, i) then
-                                                        diff = i
-                                                        break
-                                                end
-                                        end
-                                        comment(label .. " -> plant MISS n=" .. R.tostring(#list)
-                                                .. " len=" .. R.tostring(#w) .. "/" .. R.tostring(#opts.Url)
-                                                .. " firstdiff=" .. R.tostring(diff)
-                                                .. (diff and (" w=" .. R.sub(w, R.math.max(1, diff - 8), diff + 8)
-                                                        .. " r=" .. R.sub(opts.Url, R.math.max(1, diff - 8), diff + 8)) or ""))
-                                else
-                                        comment(label .. " -> plant MISS n=" .. R.tostring(#list)
-                                                .. " u0=" .. R.type(u0))
-                                end
-                        end
-                end
-                if R.type(opts.Url) == "string" and R.find(opts.Url, "x.luarmor", 1, true) then
-                        -- 1) legacy readfile_map plant (survives the shallow snapshot but a
-                        -- value restore mid-run can bring the placeholder back -- observed
-                        -- with a real script key: response 1 came back as "PENDING")
-                        local hit
-                        if R.type(CFG.readfile_map) == "table" then
-                                local body = CFG.readfile_map["__lrm_session_response"]
-                                if body then
-                                        local okh, hdrs = R.pcall(function() return R.json.decode(
-                                                CFG.readfile_map.__lrm_session_headers or "{}") end)
-                                        hit = { body = body, headers = (okh and hdrs) or {},
-                                                legacy = true }
-                                end
-                        end
-                        if hit then
-                                comment(label .. " -> canned via readfile_map ("
-                                        .. R.tostring(#hit.body) .. " bytes)")
+                if R.type(opts.Url) == "string" and R.find(opts.Url, "x.luarmor", 1, true) and R.type(CFG.readfile_map) == "table" then
+                        local body = CFG.readfile_map["__lrm_session_response"]
+                        if body then
+                                local okh, hdrs = R.pcall(function() return R.json.decode(
+                                        CFG.readfile_map.__lrm_session_headers or "{}") end)
+                                comment(label .. " -> canned via readfile_map (" .. R.tostring(#body) .. " bytes)")
                                 return { Success = true, StatusCode = 200,
-                                        Headers = hit.headers or {}, Body = hit.body }
+                                        Headers = (okh and hdrs) or {}, Body = body }
                         end
                 end
                 if CFG.http_map and R.type(opts.Url) == "string" then
@@ -4189,27 +3464,6 @@ local function httpRequest(label)
                                         Headers = hit.headers or {}, Body = hit.body }
                         end
                 end
-                -- no canned answer: for Luarmor endpoints, suspend the run for
-                -- a LIVE fetch by the serve driver. The driver plants the
-                -- response and resumes this exact thread -- the same process,
-                -- the same handshake nonce, so the response decrypts. Cross-
-                -- run replay cannot work: b embeds a 24-bit allocation-derived
-                -- nonce that shifts whenever the driver plants anything.
-                if R.type(opts.Url) == "string" and R.find(opts.Url, "luarmor", 1, true)
-                        and CFG.serve and SERVE_PAD and coroutine.isyieldable() then
-                        local tries = urls.__lrm_tries or {}
-                        urls.__lrm_tries = tries
-                        local n = (tries[opts.Url] or 0) + 1
-                        tries[opts.Url] = n
-                        if n <= 4 then
-                                R.print(MARK .. "NEEDFETCH " .. opts.Url)
-                                R.print(SERVE_PAD)
-                                coroutine.yield("__LRMRES " .. opts.Url)
-                                -- resumed with the response planted: re-enter
-                                -- the handler from the top (plant scan hits now)
-                                return httpRequest(label)(...)
-                        end
-                end
                 return callP(label .. "(" .. fmt(opts) .. ")", "response", "table")
         end
 end
@@ -4232,11 +3486,7 @@ if CFG.call_log then
         local function summ(v)
                 local t = R.type(v)
                 if t == "string" then
-                        -- CFG.call_log_full: capture whole arguments (research:
-                        -- the decrypted session plaintext walks through here)
-                        local lim = CFG.call_log_full and 4000 or 28
-                        local head = R.sub(v, 1, lim)
-                        return "s" .. #v .. ":" .. R.gsub(head, "%c", "?")
+                        return "s" .. #v .. ":" .. R.gsub(R.sub(v, 1, 28), "%c", "?")
                 elseif t == "number" then
                         return R.tostring(v)
                 end
@@ -4272,12 +3522,6 @@ if CFG.call_log then
                 wraplib("math", E.math)
                 wraplib("table", E.table)
                 if E.buffer then wraplib("buffer", E.buffer) end
-                -- method-syntax calls (s:byte()) route through the string
-                -- metatable, not the env binding: rebind it to the wrapped
-                -- copy (safe: the stack-depth canaries have already run)
-                if E.string then
-                        R.pcall(function() debug.setmetatable("", { __index = E.string }) end)
-                end
         end
         CHAIN.dumpCallLog = function()
                 local start = rn - 4000
@@ -5366,7 +4610,6 @@ R.setmetatable(ENV, {
                         end
                         return nil
                 end
-                if CFG.__superz_logglobal then R.print("\1SUPERZGLOBAL\1" .. k) end
                 local p = globalP(k, "function")
                 if CFG.trace_globals and (k == "_bsdata0" or k == "superflow_bytecode") then
                         R.print("[global-proxy]", k, debug.info(2, "s"), debug.info(2, "l"),
@@ -5734,27 +4977,12 @@ TRAMP_ENV = ENV
 for _, t in TRAMPS do R.setfenv(t, ENV) end
 -- the run section is a function so its locals get a fresh register frame:
 -- the top-level chunk is at the 200-local limit (Studio enforces it)
-local function runMain(resumeRunner)
-local chunk, cerr
-local runner, rs
-local fetchwait = false
-if resumeRunner then
-        -- serve mode "resume": continue a run suspended for a live fetch
-        runner = urls.__lrm_runner
-        urls.__lrm_runner = nil
-        chunk = true
-        if R.type(runner) ~= "thread" then
-                chunk = nil
-                cerr = "no suspended run"
-        end
-else
-        chunk, cerr = R.loadstring(__SOURCE, "=Script")
-end
+local function runMain()
+local chunk, cerr = R.loadstring(__SOURCE, "=Script")
 local status
 if not chunk then
-        status = (resumeRunner and "resume error: " or "compile error: ") .. R.tostring(cerr)
+        status = "compile error: " .. R.tostring(cerr)
 else
-        if not resumeRunner then
         if CFG.prelude then
                 -- --cfg prelude=CODE: runs first (not traced); G = _G, genv = getgenv(),
                 -- e.g. "rawset(G, 'webhook', 'x')" for scripts that read settings,
@@ -5784,24 +5012,12 @@ else
                 return R.tostring(e) .. "\n" .. debug.traceback()
         end
         -- Roblox runs scripts in their own thread; here that thread's globals are ENV
-        runner = coroutine.create(function()
+        local runner = coroutine.create(function()
                 R.setfenv(0, ENV)
                 return R.xpcall(chunk, handler)
         end)
-end -- if not resumeRunner (first-run-only setup)
--- one resume per serve call: a "__LRMRES" yield suspends the whole run
--- for a live fetch (the driver plants the response, then calls mode
--- "resume" with this exact thread -- the same process, the same nonce)
-while true do
-        rs = table.pack(coroutine.resume(runner))
+        local rs = table.pack(coroutine.resume(runner))
         if rs[1] and rs[2] == ABORT and coroutine.status(runner) == "suspended" then rs = { false, ABORT, n = 2 } end
-        if rs[1] and R.type(rs[2]) == "string" and R.sub(rs[2], 1, 9) == "__LRMRES " then
-                urls.__lrm_runner = runner
-                fetchwait = true
-        end
-        break
-end
-if not fetchwait then
         R.pcall(CHAIN.syncGenv)
         local mainOk = rs[1] and rs[2] ~= false or (rs[1] and coroutine.status(runner) == "suspended")
         local r2 = coroutine.create(function()
@@ -5834,14 +5050,6 @@ if not fetchwait then
         else
                 status = "script error: " .. R.tostring(err)
         end
-        end -- if not fetchwait
-end -- chunk ok
-
-if fetchwait then
-        -- the run stays alive in urls.__lrm_runner; the driver plants the
-        -- response and calls serve mode "resume" to continue this run
-        R.print(SERVE_PAD)
-        return "fetchwait"
 end
 
 local body = render()
@@ -5992,100 +5200,6 @@ if CFG.serve then
                         -- in a plain run, and a coroutine inherits that depth (Script42
                         -- nests 197 coroutine.wrap calls, which then hit "C stack overflow")
                         runMain()
-                        return
-                end
-                if mode == "resume" then
-                        -- continue a run suspended for a live fetch (see the
-                        -- NEEDFETCH contract in the request handlers): the
-                        -- driver planted the response and re-enters here. The
-                        -- run may suspend again for the next protocol round;
-                        -- the dump only prints when the run truly finishes.
-                        runMain(true)
-                        return
-                end
-                if mode == "plantdbg" then
-                        -- inspect the plant list state (serve-driver diagnostics)
-                        local function chk(s)
-                                local h = 0
-                                for i = 1, #s do h = (h + R.byte(s, i) * i) % 65536 end
-                                return h
-                        end
-                        local list = urls.__lrm_plant
-                        if R.type(list) ~= "table" then
-                                R.print(MARK .. "PLANTDBG none")
-                        else
-                                R.print(MARK .. "PLANTDBG entries=" .. R.tostring(#list))
-                                for i = 1, #list do
-                                        local e = list[i]
-                                        if R.type(e) == "table" and R.type(e.body) == "string" then
-                                                R.print(MARK .. "  [" .. i .. "] body=" .. R.tostring(#e.body)
-                                                        .. " url=" .. (R.type(e.url) == "string"
-                                                                and (R.tostring(#e.url) .. " chk=" .. R.tostring(chk(e.url))
-                                                                        .. " " .. R.sub(e.url, 1, 48) .. ".." .. R.sub(e.url, -10))
-                                                                or R.tostring(e.url)))
-                                        else
-                                                R.print(MARK .. "  [" .. i .. "] MALFORMED type=" .. R.type(e)
-                                                        .. "/" .. R.type(e and e.body))
-                                        end
-                                end
-                        end
-                        R.print(SERVE_PAD)
-                        return
-                end
-                if mode == "plant" and (R.type(req) == "table"
-                        or (R.type(req) == "string" and #req > 0)) then
-                        -- tamper-proof response planting. req is EITHER a
-                        -- native table {url=?, body=str, headers=?} (preferred:
-                        -- no JSON decoder in the path, any size) OR a JSON
-                        -- string with the same fields (raw body also accepted).
-                        -- Entries accumulate in urls.__lrm_plant (the
-                        -- bootstrap's anti-tamper snapshot cannot see or
-                        -- restore them): one entry per protocol round, keyed
-                        -- by full URL; a same-URL plant replaces its entry.
-                        local bodyv, headerv, urlv, reqbodyv
-                        if R.type(req) == "table" then
-                                bodyv = R.type(req.body) == "string" and req.body or nil
-                                headerv = R.type(req.headers) == "table" and req.headers or {}
-                                urlv = R.type(req.url) == "string" and req.url or nil
-                                -- [SUPERZ] optional request-body pin: the FlowAuth
-                                -- payload endpoint reuses one URL for all chunks,
-                                -- only the token in the POST body differs
-                                reqbodyv = R.type(req.reqbody) == "string" and req.reqbody or nil
-                        else
-                                local okp3, parsed3 = R.pcall(function() return R.json.decode(req) end)
-                                bodyv, headerv, urlv = req, {}, nil
-                                if okp3 and R.type(parsed3) == "table" and R.type(parsed3.body) == "string" then
-                                        bodyv = parsed3.body
-                                        urlv = parsed3.url
-                                        if R.type(parsed3.headers) == "table" then headerv = parsed3.headers end
-                                        if R.type(parsed3.reqbody) == "string" then reqbodyv = parsed3.reqbody end
-                                end
-                        end
-                        local list = urls.__lrm_plant
-                        if R.type(bodyv) ~= "string" then
-                                R.print(MARK .. "PLANT-BAD (no body)")
-                                R.print(SERVE_PAD)
-                                return
-                        end
-                        if R.type(list) ~= "table" then list = {}; urls.__lrm_plant = list end
-                        local replaced = false
-                        if R.type(urlv) == "string" then
-                                for i = 1, #list do
-                                        local e = list[i]
-                                        if R.type(e) == "table" and e.url == urlv
-                                                and (e.reqbody or nil) == (reqbodyv or nil) then
-                                                list[i] = { body = bodyv, headers = headerv, url = urlv, reqbody = reqbodyv }
-                                                replaced = true
-                                                break
-                                        end
-                                end
-                        end
-                        if not replaced then
-                                R.insert(list, { body = bodyv, headers = headerv, url = urlv, reqbody = reqbodyv })
-                        end
-                        R.print(MARK .. "PLANT-OK " .. R.tostring(#bodyv) .. " entries="
-                                .. R.tostring(#list) .. " url=" .. R.tostring(urlv ~= nil and #urlv or -1))
-                        R.print(SERVE_PAD)
                         return
                 end
                 if mode == "fetch" then

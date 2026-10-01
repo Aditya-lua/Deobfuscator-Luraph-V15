@@ -326,8 +326,7 @@ def maker_info(root, disp=None):
                                                      "proto_index": pi, "upvals_index": ui,
 
                                                      "pf_key": stack[oi]["args"][pi]["name"],
-                                                     "maker": stack[oi], "vm": clo, "stmt": st,
-                                                     "chain": stack[:oi]}
+                                                     "maker": stack[oi], "vm": clo, "stmt": st}
                                 registered = True
                 if not registered:
                     _register_dispatch_local(out, stack)
@@ -528,58 +527,28 @@ def _decls_in(fn):
     fn["_decls"] = keys
     return keys
 
-def _loc_start(key):
-    """(line, col) of a location string's start ("2,21450 - 2,21451" -> (2, 21450))."""
-    a = str(key).split(" - ")[0]
-    l, c = a.split(",")
-    return int(l), int(c)
-
 def _captures(info):
     maker_decls = _decls_in(info["maker"])
-    # v14.9-style builds nest the maker inside a helper method; the VM closure
-    # reads the helper's parameters/locals (e.g. its state table) which are NOT
-    # the maker's own decls. The capture code runs inside the maker where those
-    # names stay lexically visible, so record them too.
-    chain_decls = {}
-    if info.get("chain"):
-        mk = _loc_start(info["maker"]["location"])
-        for fn in info["chain"]:
-            for k, nm in _decls_in(fn).items():
-                if _loc_start(k) <= mk:
-                    chain_decls.setdefault(nm, []).append(k)
-
-    used_maker = {}     # decl key -> name, refs resolving into the maker
-    used_chain = {}     # refs resolving into an enclosing scope
+    used = {}
 
     def visit(n):
         if isinstance(n, dict):
             if n.get("type") == "AstExprLocal":
                 k = decl_key(n["local"])
-                nm = n["local"]["name"]
                 if k in maker_decls:
-                    used_maker[k] = nm
-                elif nm in chain_decls and k in chain_decls[nm]:
-                    used_chain[k] = nm
+                    used[k] = maker_decls[k]
             for v in n.values():
                 visit(v)
         elif isinstance(n, list):
             for v in n:
                 visit(v)
     visit(info["vm"])
+    names = {}
+    for k, name in used.items():
+        names.setdefault(name, []).append(k)
 
-    def single(members, decls_by_name):
-        """names whose refs hit exactly one decl, with exactly one decl of
-        that name (by-name capture `__PA[p].nm=nm` must be unambiguous)."""
-        names = {}
-        for k, nm in members.items():
-            names.setdefault(nm, set()).add(k)
-        return {nm for nm, ks in names.items() if len(ks) == 1 and len(decls_by_name.get(nm, [])) == 1}
-
-    maker_by_name = {}
+    dup = {nm for nm, ks in names.items() if len(ks) > 1}
+    by_name = {}
     for k, nm in maker_decls.items():
-        maker_by_name.setdefault(nm, []).append(k)
-    caps = single(used_maker, maker_by_name)
-    for nm in single(used_chain, chain_decls):
-        if nm not in maker_decls:   # a maker decl would shadow it at the hook
-            caps.add(nm)
-    return sorted(caps)
+        by_name.setdefault(nm, []).append(k)
+    return sorted(nm for nm in names if nm not in dup and len(by_name[nm]) == 1)

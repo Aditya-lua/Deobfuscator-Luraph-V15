@@ -435,6 +435,12 @@ function v14ScaffoldScore(text) {
   const frag = (text.match(/\bupv\d+(?:_\d+)?\b/g) || []).length +
                (text.match(/\(nil\)[.:[(]|\bv\(nil\)/g) || []).length;
   if (frag >= 2 && frag * 10 >= lines * 3) score += 40;
+  // Luraph's own VM interpreter lifted as the "payload": register-file soup
+  // (`local r1 = (t1[2])[1]`). Payload lifts get inferred names -- every
+  // committed v15 output and v14.7/14.8 reference has 0 raw rN, large v14.9
+  // partial lifts ~0.3 per 100 lines; the interpreter lift runs 500+ at 1.5+.
+  const regs = (text.match(/\br\d+\b/g) || []).length;
+  if (regs >= 100 && regs * 100 >= lines) score += 40;
   return score;
 }
 

@@ -4128,17 +4128,19 @@ local function httpRequest(label)
                                 if R.type(u0) == "table" and R.type(u0.url) == "string" then
                                         local w = u0.url
                                         local diff
-                                        for i = 1, R.math.min(#w, #opts.Url) do
+                                        local scan = (#w < #opts.Url) and #w or #opts.Url
+                                        for i = 1, scan do
                                                 if R.byte(w, i) ~= R.byte(opts.Url, i) then
                                                         diff = i
                                                         break
                                                 end
                                         end
+                                        local lo = diff and ((diff - 8 > 1) and (diff - 8) or 1) or 1
                                         comment(label .. " -> plant MISS n=" .. R.tostring(#list)
                                                 .. " len=" .. R.tostring(#w) .. "/" .. R.tostring(#opts.Url)
                                                 .. " firstdiff=" .. R.tostring(diff)
-                                                .. (diff and (" w=" .. R.sub(w, R.math.max(1, diff - 8), diff + 8)
-                                                        .. " r=" .. R.sub(opts.Url, R.math.max(1, diff - 8), diff + 8)) or ""))
+                                                .. (diff and (" w=" .. R.sub(w, lo, diff + 8)
+                                                        .. " r=" .. R.sub(opts.Url, lo, diff + 8)) or ""))
                                 else
                                         comment(label .. " -> plant MISS n=" .. R.tostring(#list)
                                                 .. " u0=" .. R.type(u0))

@@ -1515,7 +1515,13 @@ class Renderer:
             return "Vector3.new(%s)" % ", ".join(self.const(x) for x in xyz)
         if type(e).__name__ == "Missing":
             return "nil --[[ constant not decoded ]]"
-        return "--[[?%s]]" % type(e).__name__
+        # Fallback for an expression node the renderer has no case for. It must
+        # still be a VALUE: a bare comment in an argument/table list collapses
+        # the surrounding commas into `a, , b`, which is not valid Luau (seen on
+        # a v14.7 lift emitting `--[[?NewTable]]` between table.pack args). Emit
+        # a `nil` placeholder exactly as the Opaque/Missing cases above do, so
+        # the output parses while still flagging the unresolved node.
+        return "nil --[[?%s]]" % type(e).__name__
 
     def prefix(self, e):
         """Expression usable before `.x`, `[k]`, `(args)`, `:m()`."""

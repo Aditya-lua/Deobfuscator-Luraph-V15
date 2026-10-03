@@ -308,6 +308,53 @@ async function run(job) {
       if (!fs.existsSync(job.tracePath)) writeTrace();
       return job.tracePath;
     }
+    // A devirt output that is nothing but a nil-call stub (e.g. `return
+    // (nil)(nil)`) is a degenerate lift: the script is a thin loader whose real
+    // body is a loadstring'd nested VM chunk, and the spin watchdog aborted the
+    // trace while that chunk was doing legitimate (heavy, env-silent) decode
+    // work -- misread as a tamper spin -- so the payload never ran. Re-trace
+    // once with the watchdog relaxed and more time so the nested chunk runs to
+    // completion, then attribute the behaviour. Gated on the `(nil)(` stub
+    // shape and a tiny body, so a real small result (e.g. `print("hello")`) and
+    // every substantial lift are untouched.
+    const strippedCode = lifted.replace(/--\[\[[\s\S]*?\]\]/g, '').replace(/--[^\n]*/g, '').replace(/\s+/g, '');
+    const degenerate = /\(nil\)\(/.test(lifted) && strippedCode.length < 120;
+    if (degenerate) {
+      process.stderr.write('[!] devirtualized output is a degenerate loader stub; recovering behaviour from a spin-relaxed trace\n');
+      try {
+        const tr = new harness.Runner(job);
+        const rcfg = Object.assign({}, cfg, {
+          devirt: false,
+          spin: SPIN_CHECKS * 40,
+          time_budget: Math.max(args.budget, 120),
+        });
+        const rr = await tr.run(patched, rcfg, chunks);
+        tr.finish();
+        if (rr.body) {
+          let rb = harness.takeP2d(rr.body);
+          rb = harness.p2dMiss(rb, cachePath);
+          const { body: cb } = harness.takeChunks(rb);
+          const [b4r] = trace.takeStrings(cb);
+          const tb = tidy.tidy(trace.header(job.input) + b4r, { preamble: false });
+          let recovered = payloadTraceSource(tb, true);
+          if (recovered && !luauParses(job, recovered)) {
+            const raw = payloadTraceSource(tb, false);
+            if (raw && luauParses(job, raw)) recovered = raw;
+          }
+          if (recovered && recovered.trim() && luauParses(job, recovered)) {
+            process.stderr.write('[+] payload-attributed recovery from spin-relaxed trace\n');
+            if (!job.debug) { try { fs.unlinkSync(dpath); } catch {} }
+            const payPath = job.path('.payload.lua');
+            job.write(payPath, recovered + '\n');
+            return payPath;
+          }
+        }
+        process.stderr.write('[!] spin-relaxed recovery found no better payload; keeping the devirt output\n');
+      } catch (e) {
+        process.stderr.write(`[!] spin-relaxed recovery pass failed: ${e.message}\n`);
+      }
+    }
+
     const nilCalls = (lifted.match(/\(nil\)\(/g) || []).length;
     const lines = lifted.split('\n').length;
     if (nilCalls < 50 || nilCalls * 100 < lines) {

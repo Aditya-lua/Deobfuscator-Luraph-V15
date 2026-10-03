@@ -193,9 +193,7 @@ async function processFile(absInput, args) {
         'Luarmor whitelist client detected — devirtualization/tracing not applicable. ' +
         'Use tools/luarmor_probe.py to classify and split loader vs payload.'
       );
-    } else if (plugin.name === 'luraph_v15' || plugin.name === 'luraph_v14') {
-      // v14 shares the pipeline; job.obfuscator ("Luraph v14.x") selects the
-      // v14 mapper/engine inside driver.run and devirt_bridge.py
+    } else if (plugin.name === 'luraph_v15') {
       result = await driver.run(job);
     } else {
       result = await driver.runGeneric(job);
@@ -256,6 +254,7 @@ async function main() {
       if (res) succeeded++;
       else failed++;
     } catch (err) {
+      console.error(err);
       process.stderr.write(`[!] failed on ${path.basename(file)}: ${err.message || err}\n`);
       failed++;
     }

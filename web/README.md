@@ -95,11 +95,38 @@ its behaviour. Treat every upload as hostile. Defense in depth:
 For a public deploy, also put it behind a reverse proxy with TLS and an
 additional network-level rate limit.
 
-## Deploy targets (all Docker-based)
+## Deploy to Render (Blueprint, recommended)
 
-- **Render** — "New → Web Service", Docker runtime, Dockerfile path
-  `web/Dockerfile`, health check path `/api/health`. Set env vars in the
-  dashboard; Render injects `PORT`.
+A ready `render.yaml` Blueprint lives at the repo root — it builds
+`web/Dockerfile`, sets the health check, and configures all limits.
+
+**One-click:**
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Aditya-lua/Deobfuscator-Luraph-V15)
+
+**Or manually:**
+
+1. Render dashboard → **New → Blueprint**.
+2. Connect GitHub (one-time authorization) and pick
+   `Aditya-lua/Deobfuscator-Luraph-V15`.
+3. **Select the branch `ccr-13a7a689-lioqfx`** (that's where `render.yaml` and
+   the web app currently live) and **Apply**.
+
+Render reads `render.yaml`, builds the image, and gives you a public
+`*.onrender.com` URL. Health check is `/api/health`; `PORT` is injected
+automatically. First build takes a few minutes (it installs Python and copies
+the engine).
+
+Notes:
+- The Blueprint defaults to the **2 GB "standard"** instance — the engine can
+  use ~1.5 GB on large payloads. A 512 MB free/starter instance works for
+  smaller scripts if you also set `JOB_MEM_KB` to ~`400000`.
+- After the service is up, set `CORS_ORIGIN` to your real origin, and add an
+  egress restriction if your plan allows it.
+- Once you merge the web app into your default branch, change `branch:` in
+  `render.yaml` (and the Blueprint) to that branch.
+
+## Other deploy targets (all Docker-based)
 - **Railway** — new service from repo, Docker build; set the Dockerfile path
   and env vars. Railway injects `PORT`.
 - **Fly.io** — `fly launch --dockerfile web/Dockerfile`; add a `[[services]]`

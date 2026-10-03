@@ -1,0 +1,52 @@
+# Render Blueprint — Luraph Deobfuscator web app.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo. Render reads
+# this file, builds web/Dockerfile from the repo root, and launches the service.
+#
+# The engine devirtualizes large VMs and can use ~1.5 GB on big payloads, so the
+# default is the 2 GB "standard" instance with JOB_MEM_KB set safely below the
+# container ceiling: an oversized lift hits that ulimit and falls back to a
+# behaviour trace instead of OOM-killing the whole service. A 512 MB free/
+# starter instance also runs, but lower JOB_MEM_KB to ~400000 and expect large
+# files to fall back.
+
+services:
+  - type: web
+    name: luraph-deobfuscator
+    runtime: docker
+    # The web app currently lives on this branch. Change to your default branch
+    # (e.g. main) once it is merged there.
+    branch: ccr-13a7a689-lioqfx
+    dockerfilePath: ./web/Dockerfile
+    dockerContext: .
+    plan: standard            # 2 GB RAM / 1 CPU. "starter"/"free" = 512 MB.
+    region: oregon            # change to the region closest to your users
+    healthCheckPath: /api/health
+    autoDeploy: true          # redeploy on every push to the branch above
+    numInstances: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render injects PORT; the server already reads it. Do not hardcode PORT.
+      - key: CORS_ORIGIN
+        value: "*"            # tighten to your site origin / custom domain
+      - key: MAX_UPLOAD_BYTES
+        value: "3145728"      # 3 MB
+      - key: JOB_TIMEOUT_MS
+        value: "180000"       # 3 min wall clock per job
+      - key: MAX_CONCURRENT_JOBS
+        value: "2"
+      - key: JOB_MEM_KB
+        value: "1800000"      # ~1.76 GB ulimit, under the 2 GB plan ceiling
+      - key: JOB_CPU_SECONDS
+        value: "240"
+      - key: STACK_BUDGET_SECONDS
+        value: "150"
+      - key: RATE_MAX
+        value: "6"
+      - key: RATE_WINDOW_MS
+        value: "600000"       # 10 min
+      - key: MAX_QUEUE_LENGTH
+        value: "20"
+      - key: RESULT_TTL_MS
+        value: "900000"       # 15 min

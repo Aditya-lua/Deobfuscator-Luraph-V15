@@ -122,11 +122,11 @@ function collectInputFiles(rawPaths) {
         }
       }
     } else if (stat.isFile()) {
-      const ext = path.extname(abs).toLowerCase();
-      if (!SUPPORTED_EXTENSIONS.includes(ext)) {
-        process.stderr.write(`[!] unsupported extension for ${raw} (expected ${SUPPORTED_EXTENSIONS.join(', ')})\n`);
-        continue;
-      }
+      // An explicitly-passed file is honoured regardless of extension: real
+      // Luraph samples are frequently distributed as .txt, and the detector
+      // (not the filename) decides whether there is a payload. Directory
+      // expansion above stays restricted to .lua/.luau so folder scans don't
+      // pick up READMEs or notes.
       if (!seen.has(abs)) {
         seen.add(abs);
         files.push(abs);

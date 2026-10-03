@@ -92,7 +92,18 @@ def finish_text(text):
     return spacing.space(text)
 
 def run_big_stack(fn, *a):
-    """Deeply nested scripts need deep recursion: run in a thread with a big stack."""
+    """Deeply nested scripts need deep recursion: run in a thread with a big stack.
+
+    DEOB_STACK_BUDGET (seconds), when set, caps how long one unit of lifting may
+    run. It exists because some payloads -- seen on large Luraph v14.9 functions
+    -- lift to an IR that the codegen/structure passes churn on super-linearly
+    with no internal bound, which the symbolic-interpreter deadline cannot catch.
+    When the budget is unset (the default, and always on the v15 path) the join
+    is unbounded and behaviour is byte-for-byte unchanged. When it is exceeded we
+    raise TimeoutError; the devirt driver already treats a failed lift as "fall
+    back to the behaviour trace", so the tool degrades gracefully instead of
+    hanging. The worker is a daemon so an abandoned run cannot block process
+    exit."""
     sys.setrecursionlimit(200000)
     threading.stack_size(256 * 1024 * 1024 - 4096)
     res = {}
@@ -100,11 +111,16 @@ def run_big_stack(fn, *a):
     def target():
         try:
             res["v"] = fn(*a)
-        except BaseException as ex:  
+        except BaseException as ex:
             res["e"] = ex
-    t = threading.Thread(target=target)
+    t = threading.Thread(target=target, daemon=True)
     t.start()
-    t.join()
+    budget = os.environ.get("DEOB_STACK_BUDGET")
+    t.join(float(budget) if budget else None)
+    if t.is_alive():
+        raise TimeoutError(
+            "lift exceeded DEOB_STACK_BUDGET=%ss (codegen/structure on an "
+            "oversized function); falling back to the behaviour trace" % budget)
     if "e" in res:
         raise res["e"]
     return res.get("v")

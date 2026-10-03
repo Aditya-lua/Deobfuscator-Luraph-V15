@@ -237,8 +237,14 @@ async function run(job) {
         const bridgePy = path.join(__dirname, 'devirt_bridge.py');
         const coreDir = path.join(__dirname, '..', 'core');
         try {
+          // Bound each lift unit on the v14 path so an oversized v14.9 function
+          // that churns the codegen/structure passes degrades to the behaviour
+          // trace instead of hanging. v15 runs never set this, so their joins
+          // stay unbounded and their output is byte-for-byte unchanged.
+          const childEnv = Object.assign({}, process.env, { PYTHONPATH: coreDir });
+          if (v14 && !childEnv.DEOB_STACK_BUDGET) childEnv.DEOB_STACK_BUDGET = '150';
           execFileSync(pythonBin, [bridgePy, 'pipeline', cfgPath], {
-            env: Object.assign({}, process.env, { PYTHONPATH: coreDir }),
+            env: childEnv,
             stdio: 'inherit',
           });
         } finally {

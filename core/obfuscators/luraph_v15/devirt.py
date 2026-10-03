@@ -44,11 +44,53 @@ class PatchLog(dict):
         d, self.dirty = self.dirty, set()
         return d
 
+def _loads_tolerant(raw):
+    """Parse a harness dump, repairing a dangling comma before a closing
+    `}`/`]`. Some VM builds (seen on Luraph v14.9 proto-locals dumps) emit a
+    trailing comma on the last object member; strict json.load rejects it. We
+    try strict first -- so every dump that already parses is byte-for-byte
+    unchanged -- and only fall back to a string-aware strip that never touches
+    commas inside string literals."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        pass
+    out = []
+    in_str = esc = False
+    n = len(raw)
+    i = 0
+    while i < n:
+        ch = raw[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+        elif ch == ',':
+            j = i + 1
+            while j < n and raw[j] in " \t\r\n":
+                j += 1
+            if j < n and raw[j] in "}]":
+                i += 1
+                continue
+            out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+    return json.loads("".join(out))
+
+
 class Dump:
     def __init__(self, path):
         opener = gzip.open if str(path).endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8") as f:
-            d = json.load(f)
+            d = _loads_tolerant(f.read())
         self.raw = d
         self.tables = {}
         self.lfs = {}
@@ -2880,7 +2922,14 @@ class Program:
         self.globals = g
 
     def vm_of(self, cap):
-        tag = cap.get("__maker").decode("latin-1")
+        maker = cap.get("__maker")
+        if maker is None:
+            # Some v14.9 proto captures carry no __maker tag at all; that is the
+            # strongest form of "no VM source", so signal it the same way as an
+            # unsaved chunk below -- the caller skips such protos rather than
+            # aborting the whole Program with an AttributeError.
+            raise Unsupported("proto capture has no __maker tag")
+        tag = maker.decode("latin-1")
         if tag not in self.vms:
             raise Unsupported("no source for VM %s (a loadstring'd chunk that was not saved?)" % tag)
         return self.vms[tag]

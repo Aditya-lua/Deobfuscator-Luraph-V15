@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Luraph Deobfuscator — v14.7 to v15</title>
+<meta name="description" content="Deobfuscate Luraph-protected Luau scripts (v14.7, v14.8, v14.9 and v15). Upload a file, detect the version in your browser, and recover readable source." />
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">
+      <span class="brand-mark">{ }</span>
+      <span class="brand-name">Luraph<span class="accent">Deobf</span></span>
+    </a>
+    <nav class="nav-links">
+      <a href="#tool">Deobfuscate</a>
+      <a href="#compare">Before / After</a>
+      <a href="#support">Versions</a>
+      <a href="#cli">CLI</a>
+    </nav>
+    <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle light/dark">◑</button>
+  </div>
+</header>
+
+<main id="top">
+  <!-- HERO -->
+  <section class="hero wrap">
+    <div class="hero-copy">
+      <div class="pill">v14.7 · v14.8 · v14.9 · v15</div>
+      <h1>Turn obfuscated Luraph<br />back into readable Luau.</h1>
+      <p class="lede">
+        Drop in a Luraph-protected script. The engine devirtualizes the VM, recovers
+        the real control flow, and infers variable names from Roblox API usage —
+        then hands you source you can actually read.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#tool">Deobfuscate a file</a>
+        <a class="btn btn-ghost" href="#compare">See before / after</a>
+      </div>
+      <div class="hero-note">Detection runs in your browser. Deobfuscation runs sandboxed on the server.</div>
+    </div>
+    <div class="hero-card">
+      <div class="term">
+        <div class="term-bar"><span></span><span></span><span></span><em>deob.js</em></div>
+        <pre class="term-body"><code>$ node deob.js payload.lua -o clean.luau
+[*] obfuscator: Luraph v14.x (detected, 1.00)
+[*] tracing payload.lua (run 1)...
+[*] devirtualizing...
+[+] result: clean.luau  <span class="ok">✓ 308 lines, parses</span></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- TOOL -->
+  <section id="tool" class="wrap section">
+    <h2 class="section-title">Deobfuscate</h2>
+    <p class="section-sub">Max 3&nbsp;MB. Your upload is executed in a sandbox to trace it, then deleted. Don't upload anything with secrets you care about.</p>
+
+    <div id="preview-banner" class="banner hidden">
+      <strong>Preview mode.</strong> Version detection and the sample viewer below are fully live here.
+      Live file deobfuscation needs the backend running — <a href="#cli">deploy it with Docker</a> to enable upload-and-recover.
+    </div>
+
+    <div id="drop" class="drop" tabindex="0">
+      <input id="file" type="file" accept=".lua,.luau,.txt" hidden />
+      <div class="drop-inner">
+        <div class="drop-icon">⬆</div>
+        <div class="drop-main"><strong>Drop a .lua / .luau / .txt file</strong> or <span class="link">browse</span></div>
+        <div class="drop-sub" id="drop-sub">Version is detected instantly, in your browser.</div>
+      </div>
+    </div>
+
+    <div id="detect-row" class="detect-row hidden">
+      <div class="detect-chip" id="detect-chip">—</div>
+      <div class="detect-meta" id="detect-meta"></div>
+      <button id="go" class="btn btn-primary" disabled>Deobfuscate</button>
+    </div>
+
+    <div id="job" class="job hidden">
+      <div class="job-status" id="job-status"></div>
+      <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+      <div class="job-detail mono" id="job-detail"></div>
+    </div>
+
+    <div id="result" class="result hidden">
+      <div class="result-head">
+        <div class="result-title">Deobfuscated output</div>
+        <div class="result-actions">
+          <span class="result-info mono" id="result-info"></span>
+          <button id="copy" class="btn btn-ghost btn-sm">Copy</button>
+          <a id="download" class="btn btn-primary btn-sm" href="#">Download</a>
+        </div>
+      </div>
+      <pre class="code-pane"><code id="result-code" class="language-lua"></code></pre>
+    </div>
+  </section>
+
+  <!-- COMPARE -->
+  <section id="compare" class="wrap section">
+    <h2 class="section-title">Before / After</h2>
+    <p class="section-sub">Real samples run through the tool. The left pane is a slice of the shipped payload; the right is the recovered source.</p>
+    <div class="tabs" id="sample-tabs">
+      <button class="tab is-active" data-sample="hoshihub">HoshiHub loader · v14.7</button>
+      <button class="tab" data-sample="rideapet">Ride A Pet · v15</button>
+    </div>
+    <div class="diff">
+      <div class="diff-col">
+        <div class="diff-label">Obfuscated input <span class="mono" id="before-meta"></span></div>
+        <pre class="code-pane code-scroll"><code id="before-code" class="language-lua"></code></pre>
+      </div>
+      <div class="diff-col">
+        <div class="diff-label">Deobfuscated output <span class="mono" id="after-meta"></span></div>
+        <pre class="code-pane code-scroll"><code id="after-code" class="language-lua"></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- SUPPORT MATRIX -->
+  <section id="support" class="wrap section">
+    <h2 class="section-title">Version support</h2>
+    <p class="section-sub">What the engine handles today, and how complete the recovery is.</p>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>Luraph version</th><th>Detection</th><th>Recovery</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>v15.0</td><td><span class="dot ok"></span>Full</td><td><span class="dot ok"></span>Full devirtualization</td><td>Primary path. Byte-exact golden-tested.</td></tr>
+          <tr><td>v14.9</td><td><span class="dot ok"></span>Full</td><td><span class="dot warn"></span>Devirt + trace fallback</td><td>Large functions fall back to a behaviour trace.</td></tr>
+          <tr><td>v14.8</td><td><span class="dot ok"></span>Full</td><td><span class="dot warn"></span>Devirt + trace fallback</td><td>Wrapped/anti-leak payloads supported.</td></tr>
+          <tr><td>v14.7</td><td><span class="dot ok"></span>Full</td><td><span class="dot ok"></span>Full on most inputs</td><td>Validated across 200+ samples.</td></tr>
+          <tr><td>v14.0 – v14.6</td><td><span class="dot warn"></span>Best effort</td><td><span class="dot warn"></span>Best effort</td><td>Older layouts route through the v14 engine.</td></tr>
+          <tr><td>Luarmor client</td><td><span class="dot ok"></span>Classified</td><td><span class="dot no"></span>Loader, not devirtualizable</td><td>Auth-gated; detected and labelled.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- CLI -->
+  <section id="cli" class="wrap section">
+    <h2 class="section-title">Command line</h2>
+    <p class="section-sub">Prefer the terminal, or need to batch a folder? The engine is a self-contained CLI.</p>
+    <div class="cli-grid">
+      <div class="card">
+        <h3>Install</h3>
+        <pre class="code-pane"><code class="language-bash">git clone https://github.com/Aditya-lua/Deobfuscator-Luraph-V15
+cd Deobfuscator-Luraph-V15
+# bin/luau ships prebuilt; rebuild if needed:
+python3 build_luau.py</code></pre>
+      </div>
+      <div class="card">
+        <h3>Run</h3>
+        <pre class="code-pane"><code class="language-bash"># one file
+node deob.js payload.lua -o clean.luau
+
+# just detect the version
+node deob.js payload.lua --detect
+
+# a whole folder
+node deob.js ./scripts/</code></pre>
+      </div>
+      <div class="card">
+        <h3>Useful flags</h3>
+        <pre class="code-pane"><code class="language-bash">--detect        print version, don't run
+--no-devirt     behaviour trace only
+--timeout 180   per-run wall-clock cap (s)
+--strings       aggressive string decode</code></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <div>Luraph Deobfuscator — supports v14.7 → v15.</div>
+    <div class="footer-links">
+      <a href="https://github.com/Aditya-lua/Deobfuscator-Luraph-V15" target="_blank" rel="noopener">GitHub</a>
+      <a href="#tool">Deobfuscate</a>
+    </div>
+  </div>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="detect.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

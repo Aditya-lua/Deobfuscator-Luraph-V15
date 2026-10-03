@@ -1,0 +1,13 @@
+# Build context is the repo root; keep the image lean and don't clobber the
+# dependencies installed inside the image.
+.git
+.gitignore
+**/node_modules
+**/__pycache__
+**/*.pyc
+*.log
+*.exe
+bin/*.exe
+web/public/output
+output/
+.DS_Store

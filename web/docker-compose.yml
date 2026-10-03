@@ -1,0 +1,37 @@
+# Local / single-host deployment.
+#   docker compose -f web/docker-compose.yml up --build
+# Then open http://localhost:8080
+#
+# Resource and concurrency limits double as safety limits: this service
+# executes untrusted uploaded scripts in a sandbox. See web/README.md.
+
+services:
+  deob:
+    build:
+      context: ..              # repo root, so the engine + bin/luau are included
+      dockerfile: web/Dockerfile
+    image: luraph-deob
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      # Lock this to your site origin in production, e.g. https://deob.example.com
+      CORS_ORIGIN: "*"
+      MAX_UPLOAD_BYTES: "3145728"      # 3 MB
+      JOB_TIMEOUT_MS: "180000"         # 3 min wall clock per job
+      MAX_CONCURRENT_JOBS: "2"
+      RATE_MAX: "6"                    # jobs per IP per window
+      RATE_WINDOW_MS: "600000"         # 10 min
+      STACK_BUDGET_SECONDS: "150"
+    # Host-level resource caps (also a safety boundary for hostile payloads).
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 512
+    # The engine never needs outbound internet (the luau sandbox stubs HttpGet).
+    # Writable scratch only in tmpfs; the rest of the FS stays read-only.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

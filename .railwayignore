@@ -1,0 +1,10 @@
+.git
+node_modules
+**/node_modules
+**/__pycache__
+**/*.pyc
+*.log
+*.exe
+bin/*.exe
+output/
+web/public/output

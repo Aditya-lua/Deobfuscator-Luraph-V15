@@ -72,6 +72,45 @@ npm start          # http://localhost:8080
 | `RATE_MAX` / `RATE_WINDOW_MS` | `6` / `600000` | Per-IP rate limit |
 | `RESULT_TTL_MS` | `900000` | How long a result is downloadable before deletion |
 
+## Executor bridge (capture key-gated payloads)
+
+Some scripts are thin loaders whose real payload is fetched at runtime from a
+server that only serves it to a whitelisted session (IP/HWID tied to a redeemed
+key). The offline sandbox can't authenticate, so it can't reach that payload.
+The bridge lets you run the loader in your **own executor** (e.g. Delta on
+Android) — where your session *is* whitelisted — hook the points where the real
+stages appear (`loadstring` / `HttpGet` / `request`), and stream each captured
+stage back here, where it's deobfuscated automatically.
+
+**Disabled unless `BRIDGE_TOKEN` is set** (so a default deploy never exposes an
+open code-serving / ingest surface). To enable:
+
+```
+BRIDGE_TOKEN=<a long random secret>     # gates /bridge/boot and /bridge/ingest
+BRIDGE_PUBLIC_URL=https://your-host     # optional; defaults to the request host
+```
+
+Flow:
+1. In your executor, paste:
+   `loadstring(game:HttpGet("https://YOUR_HOST/bridge/boot?t=BRIDGE_TOKEN"))()`
+2. It prints a **session id** and installs capture hooks (auto-restored after a
+   2-minute window).
+3. Run your target script (set your `SCRIPT_KEY` first if it needs one). Each
+   real stage it loadstrings/fetches is captured and streamed back.
+4. Open `https://YOUR_HOST/bridge`, enter the token + session id, and watch each
+   capture deobfuscate — download the clean output per stage.
+
+Endpoints: `GET /bridge/boot` (serves the tracer, token-gated),
+`POST /bridge/ingest` (base64 chunks), `GET /bridge/result/:sid`,
+`GET /bridge` (status page). Captures are deobfuscated through the same queue as
+uploads and expire on the normal TTL.
+
+Notes: the tracer feature-detects and degrades across executors (`request` →
+`http_request` → `writefile`); it calls every original untouched so the target
+behaves normally. Heavy env hooking is still detectable by aggressive
+anti-tamper — run captures in a game you control or on an alt. Delta is the
+mobile client, so captured scripts run in a mobile context.
+
 ## Security — read before exposing this publicly
 
 This service **executes the uploaded script** in the `luau` sandbox to trace

@@ -103,6 +103,20 @@ function enqueue({ ip, name, buffer }) {
   return { id };
 }
 
+// Enqueue a capture that arrived over the (token-authenticated) executor
+// bridge. No per-IP rate limit -- the token is the authorization -- but the
+// queue-length cap still applies so a flood of captures can't exhaust memory.
+function enqueueTrusted({ name, buffer }) {
+  if (waiting.length >= config.MAX_QUEUE_LENGTH) {
+    return { error: 'Queue full.', status: 503 };
+  }
+  const id = newJobId();
+  jobs.set(id, { id, name, buffer, status: 'queued', createdAt: Date.now() });
+  waiting.push(id);
+  pump();
+  return { id };
+}
+
 function get(id) { return jobs.get(id); }
 
 function publicView(job) {
@@ -122,4 +136,4 @@ function stats() {
   return { active, queued: waiting.length, total: jobs.size };
 }
 
-module.exports = { enqueue, get, publicView, stats };
+module.exports = { enqueue, enqueueTrusted, get, publicView, stats };
